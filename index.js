@@ -13,7 +13,6 @@ const WS_URL = `wss://api-pr.oddsmarket.org/v4/odds_ws`;
 
 // Bookmaker IDs from trial: 1xbet (21), Sisal (103) - Pinnacle NOT in tariff!
 const BOOKMAKER_IDS = [21, 103];
-
 // Soccer sport ID
 const SPORT_ID = 7;
 
@@ -73,8 +72,16 @@ function connect() {
       } else if (message.cmd === 'fields') {
         console.log('Received field definitions');
         
+      } else if (message.cmd === 'outcomes') {
+        // Process outcomes data (odds updates)
+        await processOutcomes(message.msg);
+        
+      } else if (message.cmd === 'bookmaker_events') {
+        // Process bookmaker events data
+        await processBookmakerEvents(message.msg);
+        
       } else if (message.cmd === 'data' || message.cmd === 'update') {
-        // Process odds data
+        // Legacy format fallback
         await processOddsData(message.msg);
         
       } else if (message.cmd === 'error') {
@@ -116,16 +123,95 @@ setInterval(() => {
   }
 }, 30000);
 
+// Store events temporarily by ID for reference
+const eventsCache = new Map();
+
+async function processOutcomes(data) {
+  if (!data) return;
+  
+  // Log first message to understand structure
+  console.log('Outcomes data sample:', JSON.stringify(data).substring(0, 1000));
+  
+  const oddsRecords = [];
+  
+  // OddsMarket outcomes format: array of outcome objects
+  const outcomes = Array.isArray(data) ? data : [data];
+  
+  for (const outcome of outcomes) {
+    if (!outcome) continue;
+    
+    const eventId = outcome.event_id || outcome.eventId || outcome.eid;
+    const bookmakerId = outcome.bookmaker_id || outcome.bookmakerId || outcome.bid;
+    const odds = outcome.odds || outcome.price || outcome.value || outcome.o;
+    const marketType = outcome.market || outcome.marketName || outcome.mt || 'Match Winner';
+    const selection = outcome.outcome || outcome.outcomeName || outcome.on || outcome.sel || 'Unknown';
+    
+    if (!eventId || !bookmakerId || !odds) continue;
+    
+    // Get event info from cache
+    const eventInfo = eventsCache.get(String(eventId)) || {};
+    
+    oddsRecords.push({
+      event_id: String(eventId),
+      event_name: eventInfo.name || `Event ${eventId}`,
+      event_time: eventInfo.startsAt || null,
+      league: eventInfo.league || 'Soccer',
+      sport_id: SPORT_ID,
+      bookmaker_id: Number(bookmakerId),
+      bookmaker_name: getBookmakerName(Number(bookmakerId)),
+      market_type: String(marketType),
+      selection: String(selection),
+      odds: parseFloat(odds),
+      updated_at: new Date().toISOString()
+    });
+  }
+  
+  if (oddsRecords.length > 0) {
+    console.log(`Saving ${oddsRecords.length} outcome records...`);
+    await saveOddsRecords(oddsRecords);
+  }
+}
+
+async function processBookmakerEvents(data) {
+  if (!data) return;
+  
+  // Log first message to understand structure
+  console.log('BookmakerEvents data sample:', JSON.stringify(data).substring(0, 1000));
+  
+  const events = Array.isArray(data) ? data : [data];
+  
+  for (const event of events) {
+    if (!event) continue;
+    
+    const eventId = event.id || event.eventId || event.eid;
+    const eventName = event.name || event.eventName || `${event.home || 'Home'} vs ${event.away || 'Away'}`;
+    const startsAt = event.starts_at || event.startsAt || event.start_time;
+    const league = event.league || event.leagueName || event.tournament || 'Soccer';
+    
+    if (eventId) {
+      eventsCache.set(String(eventId), {
+        name: eventName,
+        startsAt: startsAt,
+        league: league
+      });
+      
+      // Keep cache clean (max 5000 events)
+      if (eventsCache.size > 5000) {
+        const firstKey = eventsCache.keys().next().value;
+        eventsCache.delete(firstKey);
+      }
+    }
+  }
+  
+  console.log(`Event cache size: ${eventsCache.size}`);
+}
+
 async function processOddsData(data) {
   if (!data) return;
   
   const oddsRecords = [];
+  console.log('Legacy data format:', JSON.stringify(data).substring(0, 500));
   
-  // Handle different data formats from OddsMarket
-  // The data structure may vary - log it to understand format
-  console.log('Processing data:', JSON.stringify(data).substring(0, 500));
-  
-  // If data is an array of events
   const events = Array.isArray(data) ? data : (data.events || [data]);
   
   for (const event of events) {
@@ -136,7 +222,6 @@ async function processOddsData(data) {
     const eventTime = event.startsAt || event.starts_at || event.startTime || null;
     const league = event.league || event.leagueName || event.tournament || 'Unknown';
     
-    // Process markets/outcomes
     const markets = event.markets || event.odds || [];
     
     for (const market of markets) {
@@ -155,10 +240,10 @@ async function processOddsData(data) {
             event_time: eventTime,
             league: league,
             sport_id: SPORT_ID,
-            bookmaker_id: bookmakerId,
-            bookmaker_name: getBookmakerName(bookmakerId),
-            market_type: marketType,
-            selection: selection,
+            bookmaker_id: Number(bookmakerId),
+            bookmaker_name: getBookmakerName(Number(bookmakerId)),
+            market_type: String(marketType),
+            selection: String(selection),
             odds: parseFloat(odds),
             updated_at: new Date().toISOString()
           });
@@ -168,20 +253,24 @@ async function processOddsData(data) {
   }
   
   if (oddsRecords.length > 0) {
-    console.log(`Saving ${oddsRecords.length} odds records...`);
-    
-    const { error } = await supabase
-      .from('live_odds')
-      .upsert(oddsRecords, { 
-        onConflict: 'event_id,bookmaker_id,market_type,selection',
-        ignoreDuplicates: false 
-      });
-    
-    if (error) {
-      console.error('Error saving to Supabase:', error);
-    } else {
-      console.log(`Saved ${oddsRecords.length} odds records`);
-    }
+    await saveOddsRecords(oddsRecords);
+  }
+}
+
+async function saveOddsRecords(oddsRecords) {
+  console.log(`Upserting ${oddsRecords.length} records to Supabase...`);
+  
+  const { error } = await supabase
+    .from('live_odds')
+    .upsert(oddsRecords, { 
+      onConflict: 'event_id,bookmaker_id,market_type,selection',
+      ignoreDuplicates: false 
+    });
+  
+  if (error) {
+    console.error('Error saving to Supabase:', error);
+  } else {
+    console.log(`✅ Saved ${oddsRecords.length} odds records`);
   }
 }
 
