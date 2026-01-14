@@ -6,10 +6,12 @@ const ODDSMARKET_API_KEY = process.env.ODDSMARKET_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-// OddsMarket WebSocket endpoint
-const WS_URL = `wss://api.oddsmarket.org/v4/odds_feed`;
+// OddsMarket WebSocket endpoints (CORRECT URLs from official docs)
+// Prematch: wss://api-pr.oddsmarket.org/v4/odds_ws
+// Live: wss://api-lv.oddsmarket.org/v4/odds_ws
+const WS_URL = `wss://api-pr.oddsmarket.org/v4/odds_ws`;
 
-// Bookmaker IDs from trial: 1xbet (21), Sisal (103), Pinnacle (1)
+// Bookmaker IDs from trial: Pinnacle (1), 1xbet (21), Sisal (103)
 const BOOKMAKER_IDS = [1, 21, 103];
 // Soccer sport ID
 const SPORT_ID = 7;
@@ -23,44 +25,62 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 5000;
 
 function connect() {
-  console.log('Connecting to OddsMarket WebSocket...');
+  console.log('Connecting to OddsMarket WebSocket...', WS_URL);
   
+  // IMPORTANT: Must enable permessage-deflate compression (required by OddsMarket)
   ws = new WebSocket(WS_URL, {
-    perMessageDeflate: true, // Enable compression
-    headers: {
-      'Authorization': `Bearer ${ODDSMARKET_API_KEY}`
-    }
+    perMessageDeflate: true
   });
 
   ws.on('open', () => {
     console.log('Connected to OddsMarket WebSocket');
     reconnectAttempts = 0;
     
-    // Subscribe to odds feed
-    const subscribeMessage = {
-      type: 'subscribe',
-      data: {
-        bookmaker_ids: BOOKMAKER_IDS,
-        sport_id: SPORT_ID,
-        is_prematch: true
-      }
+    // Step 1: Send authorization message (API key via JSON, not header)
+    const authMessage = {
+      cmd: 'authorization',
+      msg: ODDSMARKET_API_KEY
     };
     
-    ws.send(JSON.stringify(subscribeMessage));
-    console.log('Subscribed to odds feed:', subscribeMessage);
+    ws.send(JSON.stringify(authMessage));
+    console.log('Sent authorization message');
   });
 
   ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data.toString());
-      console.log('Received message type:', message.type);
+      console.log('Received message type:', message.cmd);
       
-      if (message.type === 'odds' || message.type === 'odds_update') {
-        await processOddsData(message.data);
-      } else if (message.type === 'error') {
-        console.error('OddsMarket error:', message.data);
-      } else if (message.type === 'subscribed') {
-        console.log('Successfully subscribed:', message.data);
+      if (message.cmd === 'authorized') {
+        console.log('Authorization successful:', message.msg);
+        
+        // Step 2: Subscribe to odds feed after authorization
+        const subscribeMessage = {
+          cmd: 'subscribe',
+          msg: {
+            bookmakerIds: BOOKMAKER_IDS,
+            sportIds: [SPORT_ID]
+          }
+        };
+        
+        ws.send(JSON.stringify(subscribeMessage));
+        console.log('Sent subscribe message:', subscribeMessage.msg);
+        
+      } else if (message.cmd === 'subscribed') {
+        console.log('Subscription successful');
+        
+      } else if (message.cmd === 'fields') {
+        console.log('Received field definitions');
+        
+      } else if (message.cmd === 'data' || message.cmd === 'update') {
+        // Process odds data
+        await processOddsData(message.msg);
+        
+      } else if (message.cmd === 'error') {
+        console.error('OddsMarket error:', message.msg);
+        
+      } else if (message.cmd === 'pong') {
+        console.log('Pong received');
       }
     } catch (error) {
       console.error('Error processing message:', error);
@@ -88,31 +108,60 @@ function attemptReconnect() {
   }
 }
 
+// Keep connection alive with ping
+setInterval(() => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ cmd: 'ping', msg: Date.now().toString() }));
+  }
+}, 30000);
+
 async function processOddsData(data) {
-  if (!data || !data.events) return;
+  if (!data) return;
   
   const oddsRecords = [];
   
-  for (const event of data.events) {
-    const eventName = `${event.home_team} vs ${event.away_team}`;
-    const eventTime = event.starts_at;
-    const league = event.league_name || 'Unknown';
+  // Handle different data formats from OddsMarket
+  // The data structure may vary - log it to understand format
+  console.log('Processing data:', JSON.stringify(data).substring(0, 500));
+  
+  // If data is an array of events
+  const events = Array.isArray(data) ? data : (data.events || [data]);
+  
+  for (const event of events) {
+    if (!event) continue;
     
-    for (const market of event.markets || []) {
-      for (const outcome of market.outcomes || []) {
-        oddsRecords.push({
-          event_id: event.id,
-          event_name: eventName,
-          event_time: eventTime,
-          league: league,
-          sport_id: SPORT_ID,
-          bookmaker_id: outcome.bookmaker_id,
-          bookmaker_name: getBookmakerName(outcome.bookmaker_id),
-          market_type: market.name,
-          selection: outcome.name,
-          odds: outcome.odds,
-          updated_at: new Date().toISOString()
-        });
+    const eventId = event.id || event.eventId || `${event.home}_${event.away}`;
+    const eventName = event.name || `${event.home || 'Team1'} vs ${event.away || 'Team2'}`;
+    const eventTime = event.startsAt || event.starts_at || event.startTime || null;
+    const league = event.league || event.leagueName || event.tournament || 'Unknown';
+    
+    // Process markets/outcomes
+    const markets = event.markets || event.odds || [];
+    
+    for (const market of markets) {
+      const marketType = market.name || market.marketName || market.type || 'Unknown';
+      const outcomes = market.outcomes || market.odds || [];
+      
+      for (const outcome of outcomes) {
+        const bookmakerId = outcome.bookmakerId || outcome.bookmaker_id || event.bookmakerId;
+        const odds = outcome.odds || outcome.price || outcome.value;
+        const selection = outcome.name || outcome.outcomeName || outcome.selection || 'Unknown';
+        
+        if (bookmakerId && odds) {
+          oddsRecords.push({
+            event_id: String(eventId),
+            event_name: eventName,
+            event_time: eventTime,
+            league: league,
+            sport_id: SPORT_ID,
+            bookmaker_id: bookmakerId,
+            bookmaker_name: getBookmakerName(bookmakerId),
+            market_type: marketType,
+            selection: selection,
+            odds: parseFloat(odds),
+            updated_at: new Date().toISOString()
+          });
+        }
       }
     }
   }
@@ -153,7 +202,8 @@ createServer((req, res) => {
   res.end(JSON.stringify({ 
     status: 'running',
     connected: ws?.readyState === WebSocket.OPEN,
-    reconnectAttempts
+    reconnectAttempts,
+    wsUrl: WS_URL
   }));
 }).listen(PORT, () => {
   console.log(`Health check server running on port ${PORT}`);
@@ -161,6 +211,8 @@ createServer((req, res) => {
 
 // Start connection
 console.log('Starting OddsMarket Worker...');
+console.log('API Key:', ODDSMARKET_API_KEY ? 'Configured' : 'MISSING');
+console.log('Supabase URL:', SUPABASE_URL ? 'Configured' : 'MISSING');
 console.log('Bookmakers:', BOOKMAKER_IDS.map(getBookmakerName).join(', '));
 connect();
 
