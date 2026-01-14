@@ -141,19 +141,18 @@ async function processOutcomes(data) {
   const outcomes = Array.isArray(data) ? data : [data];
   const oddsRecords = [];
   
-  // DEBUG: Log first outcome
+  // DEBUG: Log first outcome structure
   if (outcomes.length > 0) {
     const first = outcomes[0];
     console.log('First outcome type:', typeof first);
-    if (typeof first === 'string') {
+    if (typeof first === 'object' && first !== null && !Array.isArray(first)) {
+      console.log('First outcome keys:', Object.keys(first).join(', '));
+      console.log('First outcome data:', JSON.stringify(first).substring(0, 500));
+    } else if (Array.isArray(first)) {
+      console.log('First outcome is array, length:', first.length);
+      console.log('First outcome array:', JSON.stringify(first).substring(0, 300));
+    } else if (typeof first === 'string') {
       console.log('First outcome (raw):', first.substring(0, 100));
-      // Try base64 decode
-      try {
-        const decoded = Buffer.from(first, 'base64').toString('utf8');
-        console.log('First outcome (decoded):', decoded.substring(0, 200));
-      } catch (e) {
-        console.log('Not base64 encoded');
-      }
     }
   }
   
