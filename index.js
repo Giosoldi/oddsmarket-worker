@@ -11,8 +11,9 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 // Live: wss://api-lv.oddsmarket.org/v4/odds_ws
 const WS_URL = `wss://api-pr.oddsmarket.org/v4/odds_ws`;
 
-// Bookmaker IDs from trial: Pinnacle (1), 1xbet (21), Sisal (103)
-const BOOKMAKER_IDS = [1, 21, 103];
+// Bookmaker IDs from trial: 1xbet (21), Sisal (103) - Pinnacle NOT in tariff!
+const BOOKMAKER_IDS = [21, 103];
+
 // Soccer sport ID
 const SPORT_ID = 7;
 
