@@ -247,24 +247,45 @@ async function processOutcomes(data) {
         });
       }
     }
-    // Handle ARRAY format
-    else if (Array.isArray(outcome)) {
-      const eventId = outcome[0] || outcome[1];
-      const bookmakerId = outcome[1] || outcome[2];
-      const odds = outcome[3] || outcome[4];
+    // Handle ARRAY format - OddsMarket uses 18-element arrays
+    // Format: [encodedId, internalId, ?, period, marketTypeId, ?, ?, null, ?, null, bool, ODDS, ?, bool, ?, "eventId=X&betValue=Y&betId=Z", timestamp, null]
+    else if (Array.isArray(outcome) && outcome.length >= 12) {
+      const odds = outcome[11]; // Odds at index 11
+      const infoString = outcome[15]; // Contains eventId
+      const period = outcome[3] || 'Regular time';
       
-      if (eventId && typeof odds === 'number' && odds > 1 && odds < 100) {
+      // Extract eventId from info string like "eventId=295526161&betValue=&betId=2"
+      let eventId = null;
+      if (typeof infoString === 'string' && infoString.includes('eventId=')) {
+        const match = infoString.match(/eventId=(\d+)/);
+        if (match) {
+          eventId = match[1];
+        }
+      }
+      
+      // Only process if we have valid odds (decimal > 1)
+      if (eventId && typeof odds === 'number' && odds > 1 && odds < 1000) {
         const eventInfo = eventsCache.get(String(eventId)) || {};
+        
+        // Extract selection/bet type from betId if available
+        let selection = 'Unknown';
+        if (typeof infoString === 'string') {
+          const betMatch = infoString.match(/betId=(\d+)/);
+          if (betMatch) {
+            selection = `Bet ${betMatch[1]}`;
+          }
+        }
+        
         oddsRecords.push({
           event_id: String(eventId),
           event_name: eventInfo.name || `Event ${eventId}`,
           event_time: eventInfo.startsAt || null,
           league: eventInfo.league || 'Soccer',
           sport_id: SPORT_ID,
-          bookmaker_id: Number(bookmakerId) || 21,
-          bookmaker_name: getBookmakerName(Number(bookmakerId) || 21),
-          market_type: 'Match Winner',
-          selection: String(outcome[4] || outcome[5] || 'Unknown'),
+          bookmaker_id: eventInfo.bookmakerId || 21,
+          bookmaker_name: getBookmakerName(eventInfo.bookmakerId || 21),
+          market_type: String(period),
+          selection: selection,
           odds: parseFloat(odds),
           updated_at: new Date().toISOString()
         });
