@@ -138,14 +138,93 @@ async function processOutcomes(data) {
   
   console.log('Processing outcomes, count:', Array.isArray(data) ? data.length : 1);
   
-  const oddsRecords = [];
   const outcomes = Array.isArray(data) ? data : [data];
+  const oddsRecords = [];
+  
+  // DEBUG: Log first outcome
+  if (outcomes.length > 0) {
+    const first = outcomes[0];
+    console.log('First outcome type:', typeof first);
+    if (typeof first === 'string') {
+      console.log('First outcome (raw):', first.substring(0, 100));
+      // Try base64 decode
+      try {
+        const decoded = Buffer.from(first, 'base64').toString('utf8');
+        console.log('First outcome (decoded):', decoded.substring(0, 200));
+      } catch (e) {
+        console.log('Not base64 encoded');
+      }
+    }
+  }
   
   for (const outcome of outcomes) {
     if (!outcome) continue;
     
-    // Check if it's already an object
-    if (typeof outcome === 'object' && !Array.isArray(outcome)) {
+    // Handle STRING format (base64 encoded or pipe-delimited)
+    if (typeof outcome === 'string') {
+      let decoded = outcome;
+      
+      // Try base64 decode if it looks like base64
+      if (/^[A-Za-z0-9+/=]+$/.test(outcome) && outcome.length > 20) {
+        try {
+          decoded = Buffer.from(outcome, 'base64').toString('utf8');
+        } catch (e) {
+          // Not base64, use as-is
+        }
+      }
+      
+      // Now parse the decoded/raw string (pipe-delimited format)
+      if (decoded.includes('|')) {
+        const parts = decoded.split('|');
+        
+        // OddsMarket format appears to be:
+        // eventId|bookmakerId|marketId|outcomeId|odds|...
+        // or similar positional format
+        
+        let eventId = null;
+        let bookmakerId = null;
+        let odds = null;
+        let selection = 'Unknown';
+        
+        // Try to extract from parts
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          const num = parseFloat(part);
+          
+          // Large number could be eventId
+          if (!eventId && !isNaN(num) && num > 1000000) {
+            eventId = String(Math.floor(num));
+          }
+          // Small number 1-200 could be bookmakerId
+          else if (!bookmakerId && !isNaN(num) && num >= 1 && num <= 200 && Number.isInteger(num)) {
+            bookmakerId = num;
+          }
+          // Decimal between 1-100 could be odds
+          else if (!odds && !isNaN(num) && num > 1 && num < 100 && part.includes('.')) {
+            odds = num;
+          }
+        }
+        
+        if (eventId && odds) {
+          const eventInfo = eventsCache.get(eventId) || {};
+          oddsRecords.push({
+            event_id: eventId,
+            event_name: eventInfo.name || `Event ${eventId}`,
+            event_time: eventInfo.startsAt || null,
+            league: eventInfo.league || 'Soccer',
+            sport_id: SPORT_ID,
+            bookmaker_id: bookmakerId || 21,
+            bookmaker_name: getBookmakerName(bookmakerId || 21),
+            market_type: 'Match Winner',
+            selection: selection,
+            odds: odds,
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
+    }
+    // Handle OBJECT format
+    else if (typeof outcome === 'object' && !Array.isArray(outcome)) {
       const eventId = outcome.event_id || outcome.eventId || outcome.eid;
       const bookmakerId = outcome.bookmaker_id || outcome.bookmakerId || outcome.bid;
       const odds = outcome.odds || outcome.price || outcome.value;
@@ -169,14 +248,13 @@ async function processOutcomes(data) {
         });
       }
     }
-    // If it's an array, parse positionally based on OddsMarket format
+    // Handle ARRAY format
     else if (Array.isArray(outcome)) {
-      // Try to parse array format: [outcomeId, eventId, bookmakerId, odds, ...]
-      const eventId = outcome[1];
-      const bookmakerId = outcome[2];
-      const odds = outcome[3];
+      const eventId = outcome[0] || outcome[1];
+      const bookmakerId = outcome[1] || outcome[2];
+      const odds = outcome[3] || outcome[4];
       
-      if (eventId && bookmakerId && odds && typeof odds === 'number') {
+      if (eventId && typeof odds === 'number' && odds > 1 && odds < 100) {
         const eventInfo = eventsCache.get(String(eventId)) || {};
         oddsRecords.push({
           event_id: String(eventId),
@@ -184,51 +262,13 @@ async function processOutcomes(data) {
           event_time: eventInfo.startsAt || null,
           league: eventInfo.league || 'Soccer',
           sport_id: SPORT_ID,
-          bookmaker_id: Number(bookmakerId),
-          bookmaker_name: getBookmakerName(Number(bookmakerId)),
+          bookmaker_id: Number(bookmakerId) || 21,
+          bookmaker_name: getBookmakerName(Number(bookmakerId) || 21),
           market_type: 'Match Winner',
-          selection: String(outcome[4] || 'Unknown'),
+          selection: String(outcome[4] || outcome[5] || 'Unknown'),
           odds: parseFloat(odds),
           updated_at: new Date().toISOString()
         });
-      }
-    }
-    // If it's a string (possibly pipe-delimited or encoded)
-    else if (typeof outcome === 'string') {
-      // OddsMarket sometimes sends pipe-delimited strings
-      if (outcome.includes('|')) {
-        const parts = outcome.split('|');
-        // Try to extract data from pipe-delimited format
-        // Format appears to be: base64EncodedId|eventId|...
-        const eventId = parts[1];
-        const bookmakerId = parts[2];
-        
-        // Look for odds value (usually a decimal number)
-        let odds = null;
-        for (const part of parts) {
-          const num = parseFloat(part);
-          if (!isNaN(num) && num > 1 && num < 100) {
-            odds = num;
-            break;
-          }
-        }
-        
-        if (eventId && odds) {
-          const eventInfo = eventsCache.get(String(eventId)) || {};
-          oddsRecords.push({
-            event_id: String(eventId),
-            event_name: eventInfo.name || `Event ${eventId}`,
-            event_time: eventInfo.startsAt || null,
-            league: eventInfo.league || 'Soccer',
-            sport_id: SPORT_ID,
-            bookmaker_id: Number(bookmakerId) || 21,
-            bookmaker_name: getBookmakerName(Number(bookmakerId) || 21),
-            market_type: 'Match Winner',
-            selection: 'Unknown',
-            odds: odds,
-            updated_at: new Date().toISOString()
-          });
-        }
       }
     }
   }
@@ -237,7 +277,7 @@ async function processOutcomes(data) {
     console.log(`✅ Parsed ${oddsRecords.length} outcome records, saving...`);
     await saveOddsRecords(oddsRecords);
   } else {
-    console.log('⚠️ No valid outcomes parsed from data');
+    console.log('⚠️ No valid outcomes parsed from', outcomes.length, 'items');
   }
 }
 
