@@ -21,6 +21,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 let ws = null;
 let reconnectAttempts = 0;
+let fieldDefinitions = null; // Store field definitions from OddsMarket
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 5000;
 
@@ -70,7 +71,9 @@ function connect() {
         console.log('Subscription successful');
         
       } else if (message.cmd === 'fields') {
-        console.log('Received field definitions');
+        // Store field definitions for parsing arrays
+        console.log('Received field definitions:', JSON.stringify(message.msg).substring(0, 500));
+        fieldDefinitions = message.msg;
         
       } else if (message.cmd === 'outcomes') {
         // Process outcomes data (odds updates)
@@ -126,84 +129,172 @@ setInterval(() => {
 // Store events temporarily by ID for reference
 const eventsCache = new Map();
 
+// OddsMarket uses compact array format. Based on observed data:
+// bookmaker_events array: [eventId, bookmakerId, active, timestamp, eventName, sportId, league, ...]
+// outcomes array: strings like "MTg5OTMxMjIwNnw0MDQs..." which are base64 encoded
+
 async function processOutcomes(data) {
   if (!data) return;
   
-  // Log first message to understand structure
-  console.log('Outcomes data sample:', JSON.stringify(data).substring(0, 1000));
+  console.log('Processing outcomes, count:', Array.isArray(data) ? data.length : 1);
   
   const oddsRecords = [];
-  
-  // OddsMarket outcomes format: array of outcome objects
   const outcomes = Array.isArray(data) ? data : [data];
   
   for (const outcome of outcomes) {
     if (!outcome) continue;
     
-    const eventId = outcome.event_id || outcome.eventId || outcome.eid;
-    const bookmakerId = outcome.bookmaker_id || outcome.bookmakerId || outcome.bid;
-    const odds = outcome.odds || outcome.price || outcome.value || outcome.o;
-    const marketType = outcome.market || outcome.marketName || outcome.mt || 'Match Winner';
-    const selection = outcome.outcome || outcome.outcomeName || outcome.on || outcome.sel || 'Unknown';
-    
-    if (!eventId || !bookmakerId || !odds) continue;
-    
-    // Get event info from cache
-    const eventInfo = eventsCache.get(String(eventId)) || {};
-    
-    oddsRecords.push({
-      event_id: String(eventId),
-      event_name: eventInfo.name || `Event ${eventId}`,
-      event_time: eventInfo.startsAt || null,
-      league: eventInfo.league || 'Soccer',
-      sport_id: SPORT_ID,
-      bookmaker_id: Number(bookmakerId),
-      bookmaker_name: getBookmakerName(Number(bookmakerId)),
-      market_type: String(marketType),
-      selection: String(selection),
-      odds: parseFloat(odds),
-      updated_at: new Date().toISOString()
-    });
+    // Check if it's already an object
+    if (typeof outcome === 'object' && !Array.isArray(outcome)) {
+      const eventId = outcome.event_id || outcome.eventId || outcome.eid;
+      const bookmakerId = outcome.bookmaker_id || outcome.bookmakerId || outcome.bid;
+      const odds = outcome.odds || outcome.price || outcome.value;
+      const marketType = outcome.market || outcome.marketName || 'Match Winner';
+      const selection = outcome.outcome || outcome.outcomeName || outcome.sel || 'Unknown';
+      
+      if (eventId && bookmakerId && odds) {
+        const eventInfo = eventsCache.get(String(eventId)) || {};
+        oddsRecords.push({
+          event_id: String(eventId),
+          event_name: eventInfo.name || `Event ${eventId}`,
+          event_time: eventInfo.startsAt || null,
+          league: eventInfo.league || 'Soccer',
+          sport_id: SPORT_ID,
+          bookmaker_id: Number(bookmakerId),
+          bookmaker_name: getBookmakerName(Number(bookmakerId)),
+          market_type: String(marketType),
+          selection: String(selection),
+          odds: parseFloat(odds),
+          updated_at: new Date().toISOString()
+        });
+      }
+    }
+    // If it's an array, parse positionally based on OddsMarket format
+    else if (Array.isArray(outcome)) {
+      // Try to parse array format: [outcomeId, eventId, bookmakerId, odds, ...]
+      const eventId = outcome[1];
+      const bookmakerId = outcome[2];
+      const odds = outcome[3];
+      
+      if (eventId && bookmakerId && odds && typeof odds === 'number') {
+        const eventInfo = eventsCache.get(String(eventId)) || {};
+        oddsRecords.push({
+          event_id: String(eventId),
+          event_name: eventInfo.name || `Event ${eventId}`,
+          event_time: eventInfo.startsAt || null,
+          league: eventInfo.league || 'Soccer',
+          sport_id: SPORT_ID,
+          bookmaker_id: Number(bookmakerId),
+          bookmaker_name: getBookmakerName(Number(bookmakerId)),
+          market_type: 'Match Winner',
+          selection: String(outcome[4] || 'Unknown'),
+          odds: parseFloat(odds),
+          updated_at: new Date().toISOString()
+        });
+      }
+    }
+    // If it's a string (possibly pipe-delimited or encoded)
+    else if (typeof outcome === 'string') {
+      // OddsMarket sometimes sends pipe-delimited strings
+      if (outcome.includes('|')) {
+        const parts = outcome.split('|');
+        // Try to extract data from pipe-delimited format
+        // Format appears to be: base64EncodedId|eventId|...
+        const eventId = parts[1];
+        const bookmakerId = parts[2];
+        
+        // Look for odds value (usually a decimal number)
+        let odds = null;
+        for (const part of parts) {
+          const num = parseFloat(part);
+          if (!isNaN(num) && num > 1 && num < 100) {
+            odds = num;
+            break;
+          }
+        }
+        
+        if (eventId && odds) {
+          const eventInfo = eventsCache.get(String(eventId)) || {};
+          oddsRecords.push({
+            event_id: String(eventId),
+            event_name: eventInfo.name || `Event ${eventId}`,
+            event_time: eventInfo.startsAt || null,
+            league: eventInfo.league || 'Soccer',
+            sport_id: SPORT_ID,
+            bookmaker_id: Number(bookmakerId) || 21,
+            bookmaker_name: getBookmakerName(Number(bookmakerId) || 21),
+            market_type: 'Match Winner',
+            selection: 'Unknown',
+            odds: odds,
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
+    }
   }
   
   if (oddsRecords.length > 0) {
-    console.log(`Saving ${oddsRecords.length} outcome records...`);
+    console.log(`✅ Parsed ${oddsRecords.length} outcome records, saving...`);
     await saveOddsRecords(oddsRecords);
+  } else {
+    console.log('⚠️ No valid outcomes parsed from data');
   }
 }
 
 async function processBookmakerEvents(data) {
   if (!data) return;
   
-  // Log first message to understand structure
-  console.log('BookmakerEvents data sample:', JSON.stringify(data).substring(0, 1000));
+  console.log('Processing bookmaker_events, count:', Array.isArray(data) ? data.length : 1);
   
   const events = Array.isArray(data) ? data : [data];
+  let added = 0;
   
   for (const event of events) {
     if (!event) continue;
     
-    const eventId = event.id || event.eventId || event.eid;
-    const eventName = event.name || event.eventName || `${event.home || 'Home'} vs ${event.away || 'Away'}`;
-    const startsAt = event.starts_at || event.startsAt || event.start_time;
-    const league = event.league || event.leagueName || event.tournament || 'Soccer';
+    let eventId, eventName, startsAt, league, bookmakerId;
+    
+    // If it's an array (OddsMarket compact format)
+    if (Array.isArray(event)) {
+      // Based on log: [1899312206,21,true,411201800,"Понте-Прета - Вело Клуб СП",...]
+      // Format: [eventId, bookmakerId, active, timestamp, eventName, sportId?, league?, ...]
+      eventId = event[0];
+      bookmakerId = event[1];
+      // event[2] is boolean (active)
+      // event[3] is timestamp
+      eventName = event[4] || `Event ${eventId}`;
+      // Try to find league in remaining elements
+      league = event[6] || event[7] || 'Soccer';
+      startsAt = event[3] ? new Date(event[3] * 1000).toISOString() : null;
+    }
+    // If it's an object
+    else if (typeof event === 'object') {
+      eventId = event.id || event.eventId || event.eid;
+      eventName = event.name || event.eventName || `${event.home || 'Home'} vs ${event.away || 'Away'}`;
+      startsAt = event.starts_at || event.startsAt || event.start_time;
+      league = event.league || event.leagueName || event.tournament || 'Soccer';
+      bookmakerId = event.bookmaker_id || event.bookmakerId;
+    }
     
     if (eventId) {
       eventsCache.set(String(eventId), {
         name: eventName,
         startsAt: startsAt,
-        league: league
+        league: league,
+        bookmakerId: bookmakerId
       });
-      
-      // Keep cache clean (max 5000 events)
-      if (eventsCache.size > 5000) {
-        const firstKey = eventsCache.keys().next().value;
-        eventsCache.delete(firstKey);
-      }
+      added++;
     }
   }
   
-  console.log(`Event cache size: ${eventsCache.size}`);
+  console.log(`✅ Event cache updated: +${added} events, total: ${eventsCache.size}`);
+  
+  // Keep cache clean (max 5000 events)
+  if (eventsCache.size > 5000) {
+    const keysToDelete = [...eventsCache.keys()].slice(0, 1000);
+    keysToDelete.forEach(k => eventsCache.delete(k));
+    console.log('🧹 Cleaned event cache, new size:', eventsCache.size);
+  }
 }
 
 async function processOddsData(data) {
