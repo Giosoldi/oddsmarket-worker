@@ -409,11 +409,20 @@ async function processOddsData(data) {
 }
 
 async function saveOddsRecords(oddsRecords) {
-  console.log(`Upserting ${oddsRecords.length} records to Supabase...`);
+  // Deduplicate records by unique key before upserting
+  const uniqueMap = new Map();
+  for (const record of oddsRecords) {
+    const key = `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}`;
+    // Keep the latest record (last one wins)
+    uniqueMap.set(key, record);
+  }
+  
+  const uniqueRecords = Array.from(uniqueMap.values());
+  console.log(`Upserting ${uniqueRecords.length} unique records to Supabase (from ${oddsRecords.length} total)...`);
   
   const { error } = await supabase
     .from('live_odds')
-    .upsert(oddsRecords, { 
+    .upsert(uniqueRecords, { 
       onConflict: 'event_id,bookmaker_id,market_type,selection',
       ignoreDuplicates: false 
     });
@@ -421,7 +430,7 @@ async function saveOddsRecords(oddsRecords) {
   if (error) {
     console.error('Error saving to Supabase:', error);
   } else {
-    console.log(`✅ Saved ${oddsRecords.length} odds records`);
+    console.log(`✅ Saved ${uniqueRecords.length} odds records`);
   }
 }
 
