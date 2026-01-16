@@ -283,13 +283,16 @@ async function processOutcomes(data) {
           selection = `Bet ${betMatch[1]}`;
         }
         
-        // Parse market type from codiceClasseEsito or codiceScommessa
+        // Parse market type from codiceScommessa (shared across bookmakers!)
         const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
-        const classeMatch = infoString.match(/codiceClasseEsito=(\d+)/);
         if (marketMatch) {
-          marketType = `Market ${marketMatch[1]}`;
-        } else if (classeMatch) {
-          marketType = `Classe ${classeMatch[1]}`;
+          marketType = `M${marketMatch[1]}`; // Use consistent format M{code}
+        }
+        
+        // Parse selection from codiceEsito (the actual bet outcome code)
+        const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
+        if (esitoMatch) {
+          selection = `E${esitoMatch[1]}`; // E1=Home, E2=Away, EX=Draw typically
         }
       }
       
