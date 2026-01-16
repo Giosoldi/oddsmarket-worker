@@ -250,10 +250,9 @@ async function processOutcomes(data) {
       }
     }
     // Handle ARRAY format - OddsMarket uses 18-element arrays
-    // Format: [encodedId, bookmakerId, ?, period, marketTypeId, ?, ?, null, ?, null, bool, ODDS, ?, bool, ?, "eventId=X&...", timestamp, null]
-    // Note: bookmakerId is at index 1 (second element)!
+    // Format: [encodedId, internalEventId, ?, period, marketTypeId, ?, ?, null, ?, null, bool, ODDS, ?, bool, ?, "eventId=X&...", timestamp, null]
+    // Note: bookmakerId is NOT in the outcome array - it comes from eventsCache!
     else if (Array.isArray(outcome) && outcome.length >= 12) {
-      const bookmakerId = outcome[1]; // Bookmaker ID at index 1!
       const odds = outcome[11]; // Odds at index 11
       const infoString = outcome[15]; // Contains eventId and market details
       const period = outcome[3] || 'Regular time';
@@ -289,10 +288,12 @@ async function processOutcomes(data) {
         }
       }
       
-      // Only process if we have valid bookmaker, eventId, and odds
-      if (eventId && typeof bookmakerId === 'number' && typeof odds === 'number' && odds > 1 && odds < 1000) {
-        const eventInfo = eventsCache.get(String(eventId)) || {};
-        
+      // Get bookmaker from events cache (set by bookmaker_events messages)
+      const eventInfo = eventsCache.get(String(eventId)) || {};
+      const bookmakerId = eventInfo.bookmakerId;
+      
+      // Only process if we have valid eventId, bookmakerId, and odds
+      if (eventId && bookmakerId && typeof odds === 'number' && odds > 1 && odds < 1000) {
         oddsRecords.push({
           event_id: String(eventId),
           event_name: eventInfo.name || `Event ${eventId}`,
