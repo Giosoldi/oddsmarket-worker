@@ -16,6 +16,106 @@ const BOOKMAKER_IDS = [21, 103];
 // Soccer sport ID
 const SPORT_ID = 7;
 
+// ============ MARKET MAPPING FUNCTIONS ============
+// These map bookmaker-specific codes to standardized market names
+
+// 1xbet betId mapping (common soccer markets)
+// Based on 1xbet API documentation and observed patterns
+const ONEXBET_MARKETS = {
+  // Main markets
+  1: { market: '1X2', selection: '1' },       // Home
+  2: { market: '1X2', selection: 'X' },       // Draw
+  3: { market: '1X2', selection: '2' },       // Away
+  4: { market: 'Double Chance', selection: '1X' },
+  5: { market: 'Double Chance', selection: '12' },
+  6: { market: 'Double Chance', selection: 'X2' },
+  7: { market: 'Over/Under', selection: 'Over 0.5' },
+  8: { market: 'Over/Under', selection: 'Under 0.5' },
+  9: { market: 'Over/Under', selection: 'Over 1.5' },
+  10: { market: 'Over/Under', selection: 'Under 1.5' },
+  11: { market: 'Over/Under', selection: 'Over 2.5' },
+  12: { market: 'Over/Under', selection: 'Under 2.5' },
+  13: { market: 'Over/Under', selection: 'Over 3.5' },
+  14: { market: 'Over/Under', selection: 'Under 3.5' },
+  // BTTS
+  424: { market: 'BTTS', selection: 'Yes' },
+  425: { market: 'BTTS', selection: 'No' },
+  426: { market: 'BTTS', selection: 'Yes' },
+  // Corners
+  739: { market: 'Corners Over/Under', selection: 'Over 7.5' },
+  741: { market: 'Corners Over/Under', selection: 'Over 8.5' },
+  743: { market: 'Corners Over/Under', selection: 'Over 9.5' },
+  749: { market: 'Corners Over/Under', selection: 'Over 10.5' },
+  753: { market: 'Corners Over/Under', selection: 'Over 11.5' },
+  763: { market: 'Corners Over/Under', selection: 'Over 12.5' },
+  // Cards (bookings)
+  3827: { market: 'Cards Over/Under', selection: 'Over 2.5' },
+  3828: { market: 'Cards Over/Under', selection: 'Under 2.5' },
+  3829: { market: 'Cards Over/Under', selection: 'Over 3.5' },
+  3830: { market: 'Cards Over/Under', selection: 'Under 3.5' },
+  // Stats markets
+  7778: { market: 'Shots On Target', selection: 'Over 5.5' },
+  7779: { market: 'Shots On Target', selection: 'Under 5.5' },
+  7780: { market: 'Shots On Target', selection: 'Over 6.5' },
+  7781: { market: 'Shots On Target', selection: 'Under 6.5' },
+};
+
+function map1xbetBetId(betId) {
+  const mapped = ONEXBET_MARKETS[betId];
+  if (mapped) {
+    return mapped;
+  }
+  // Fallback: return raw betId for unmapped markets
+  return { market: `Bet${betId}`, selection: 'Unknown' };
+}
+
+// Sisal codiceScommessa mapping (Italian market codes)
+const SISAL_MARKETS = {
+  3: '1X2',                    // Esito finale
+  4: 'Under/Over',             // Under/Over
+  8: 'Double Chance',          // Doppia Chance
+  14: 'Handicap',              // Handicap
+  18: 'BTTS',                  // Goal/No Goal
+  127: '1X2',                  // Esito 1X2
+  7989: 'Under/Over',          // Under/Over totale
+  8333: 'Handicap',            // Handicap Asiatico
+  9942: 'Corners',             // Calci d'angolo
+  15911: 'Cards',              // Ammonizioni
+  21605: 'Stats',              // Statistiche
+  28319: 'Shots',              // Tiri in porta
+};
+
+function mapSisalMarket(codice) {
+  const mapped = SISAL_MARKETS[codice];
+  if (mapped) {
+    return mapped;
+  }
+  return `M${codice}`;
+}
+
+// Sisal codiceEsito mapping
+const SISAL_SELECTIONS = {
+  '1': '1',       // Home
+  '2': '2',       // Away
+  '3': 'X',       // Draw
+  '4': '1X',      // Home or Draw
+  '5': '12',      // Home or Away
+  '6': 'X2',      // Draw or Away
+  '9': 'Over',    // Over
+  '14': 'Under',  // Under
+  '15': 'Yes',    // Yes (BTTS)
+  '18': 'No',     // No (BTTS)
+  '21': 'Over 0.5',
+};
+
+function mapSisalSelection(codiceEsito) {
+  const mapped = SISAL_SELECTIONS[codiceEsito];
+  if (mapped) {
+    return mapped;
+  }
+  return `E${codiceEsito}`;
+}
+
 // Initialize Supabase client
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -274,25 +374,30 @@ async function processOutcomes(data) {
           externalEventId = eventMatch[1];
         }
         
-        // Parse selection/bet type from selectionId or betId
-        const selMatch = infoString.match(/selectionId=(\d+)/);
-        const betMatch = infoString.match(/betId=(\d+)/);
-        if (selMatch) {
-          selection = `Selection ${selMatch[1]}`;
-        } else if (betMatch) {
-          selection = `Bet ${betMatch[1]}`;
-        }
-        
-        // Parse market type from codiceScommessa (shared across bookmakers!)
-        const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
-        if (marketMatch) {
-          marketType = `M${marketMatch[1]}`; // Use consistent format M{code}
-        }
-        
-        // Parse selection from codiceEsito (the actual bet outcome code)
-        const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
-        if (esitoMatch) {
-          selection = `E${esitoMatch[1]}`; // E1=Home, E2=Away, EX=Draw typically
+        // --- BOOKMAKER-SPECIFIC PARSING ---
+        if (bookmakerId === 21) {
+          // 1xbet: uses betId for market/selection
+          // betId encodes both market type and selection
+          const betMatch = infoString.match(/betId=(\d+)/);
+          if (betMatch) {
+            const betId = parseInt(betMatch[1]);
+            // Map common 1xbet betIds to standardized market codes
+            const mapped = map1xbetBetId(betId);
+            marketType = mapped.market;
+            selection = mapped.selection;
+          }
+        } else if (bookmakerId === 103) {
+          // Sisal: uses codiceScommessa + codiceEsito
+          const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
+          const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
+          if (marketMatch) {
+            const codice = parseInt(marketMatch[1]);
+            // Map Sisal market codes to standardized format
+            marketType = mapSisalMarket(codice);
+          }
+          if (esitoMatch) {
+            selection = mapSisalSelection(esitoMatch[1]);
+          }
         }
       }
       
