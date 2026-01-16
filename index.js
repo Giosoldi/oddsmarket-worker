@@ -486,6 +486,11 @@ async function processOutcomes(data) {
       const eventInfo = eventsCache.get(String(internalEventId)) || {};
       const bookmakerId = eventInfo.bookmakerId;
       
+      // DEBUG: Log cache hit/miss for first few outcomes
+      if (Math.random() < 0.01) { // Log 1% of lookups
+        console.log(`🔍 Cache lookup: internalId=${internalEventId}, found=${!!eventInfo.name}, cached=${eventsCache.size} total`);
+      }
+      
       // Extract external eventId for storage (for matching across bookmakers)
       let externalEventId = null;
       let marketType = period;
@@ -537,9 +542,18 @@ async function processOutcomes(data) {
       }
       
       if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === 'number' && odds > 1 && odds < 1000) {
+        // IMPORTANT: Use the event name from cache (looked up via internalEventId)
+        // eventInfo is already populated above using internalEventId
+        const eventName = eventInfo.name || `Event ${eventIdForStorage}`;
+        
+        // DEBUG: Log when we have proper names vs fallback
+        if (!eventInfo.name) {
+          console.log(`⚠️ No cached name for internal ID ${internalEventId}, using fallback`);
+        }
+        
         oddsRecords.push({
           event_id: eventIdForStorage,
-          event_name: eventInfo.name || `Event ${eventIdForStorage}`,
+          event_name: eventName,
           event_time: eventInfo.startsAt || null,
           league: eventInfo.league || 'Soccer',
           sport_id: SPORT_ID,
