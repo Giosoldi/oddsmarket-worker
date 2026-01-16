@@ -16,48 +16,157 @@ const BOOKMAKER_IDS = [21, 103];
 // Soccer sport ID
 const SPORT_ID = 7;
 
-// ============ MARKET MAPPING FUNCTIONS ============
-// These map bookmaker-specific codes to standardized market names
+// ============ STATISTICAL MARKETS ONLY ============
+// Save: Shots, Shots on Target, Fouls, Offsides, Corners
+// Including: Total + Team 1 (Home) + Team 2 (Away) versions
 
-// 1xbet betId mapping (common soccer markets)
-// Based on 1xbet API documentation and observed patterns
+// Allowed statistical market prefixes (standardized names)
+const STATISTICAL_MARKETS = [
+  'Shots',              // Tiri totali
+  'Shots On Target',    // Tiri in porta
+  'Shots Home',         // Tiri squadra casa
+  'Shots Away',         // Tiri squadra trasferta
+  'Shots On Target Home', // Tiri in porta casa
+  'Shots On Target Away', // Tiri in porta trasferta
+  'Fouls',              // Falli totali
+  'Fouls Home',         // Falli casa
+  'Fouls Away',         // Falli trasferta
+  'Offsides',           // Fuorigiochi totali
+  'Offsides Home',      // Fuorigiochi casa
+  'Offsides Away',      // Fuorigiochi trasferta
+  'Corners',            // Angoli totali
+  'Corners Home',       // Angoli casa
+  'Corners Away',       // Angoli trasferta
+];
+
+function isStatisticalMarket(marketType) {
+  if (!marketType) return false;
+  return STATISTICAL_MARKETS.some(stat => 
+    marketType.toLowerCase().includes(stat.toLowerCase())
+  );
+}
+
+// 1xbet betId mapping - STATISTICAL MARKETS (Total + Team-specific)
+// Note: betId codes are estimated - will need discovery from live data
 const ONEXBET_MARKETS = {
-  // Main markets
-  1: { market: '1X2', selection: '1' },       // Home
-  2: { market: '1X2', selection: 'X' },       // Draw
-  3: { market: '1X2', selection: '2' },       // Away
-  4: { market: 'Double Chance', selection: '1X' },
-  5: { market: 'Double Chance', selection: '12' },
-  6: { market: 'Double Chance', selection: 'X2' },
-  7: { market: 'Over/Under', selection: 'Over 0.5' },
-  8: { market: 'Over/Under', selection: 'Under 0.5' },
-  9: { market: 'Over/Under', selection: 'Over 1.5' },
-  10: { market: 'Over/Under', selection: 'Under 1.5' },
-  11: { market: 'Over/Under', selection: 'Over 2.5' },
-  12: { market: 'Over/Under', selection: 'Under 2.5' },
-  13: { market: 'Over/Under', selection: 'Over 3.5' },
-  14: { market: 'Over/Under', selection: 'Under 3.5' },
-  // BTTS
-  424: { market: 'BTTS', selection: 'Yes' },
-  425: { market: 'BTTS', selection: 'No' },
-  426: { market: 'BTTS', selection: 'Yes' },
-  // Corners
-  739: { market: 'Corners Over/Under', selection: 'Over 7.5' },
-  741: { market: 'Corners Over/Under', selection: 'Over 8.5' },
-  743: { market: 'Corners Over/Under', selection: 'Over 9.5' },
-  749: { market: 'Corners Over/Under', selection: 'Over 10.5' },
-  753: { market: 'Corners Over/Under', selection: 'Over 11.5' },
-  763: { market: 'Corners Over/Under', selection: 'Over 12.5' },
-  // Cards (bookings)
-  3827: { market: 'Cards Over/Under', selection: 'Over 2.5' },
-  3828: { market: 'Cards Over/Under', selection: 'Under 2.5' },
-  3829: { market: 'Cards Over/Under', selection: 'Over 3.5' },
-  3830: { market: 'Cards Over/Under', selection: 'Under 3.5' },
-  // Stats markets
+  // ===== CORNERS - Calci d'angolo =====
+  // Total
+  739: { market: 'Corners', selection: 'Over 7.5' },
+  740: { market: 'Corners', selection: 'Under 7.5' },
+  741: { market: 'Corners', selection: 'Over 8.5' },
+  742: { market: 'Corners', selection: 'Under 8.5' },
+  743: { market: 'Corners', selection: 'Over 9.5' },
+  744: { market: 'Corners', selection: 'Under 9.5' },
+  749: { market: 'Corners', selection: 'Over 10.5' },
+  750: { market: 'Corners', selection: 'Under 10.5' },
+  753: { market: 'Corners', selection: 'Over 11.5' },
+  754: { market: 'Corners', selection: 'Under 11.5' },
+  763: { market: 'Corners', selection: 'Over 12.5' },
+  764: { market: 'Corners', selection: 'Under 12.5' },
+  // Home team corners
+  765: { market: 'Corners Home', selection: 'Over 3.5' },
+  766: { market: 'Corners Home', selection: 'Under 3.5' },
+  767: { market: 'Corners Home', selection: 'Over 4.5' },
+  768: { market: 'Corners Home', selection: 'Under 4.5' },
+  769: { market: 'Corners Home', selection: 'Over 5.5' },
+  770: { market: 'Corners Home', selection: 'Under 5.5' },
+  // Away team corners
+  771: { market: 'Corners Away', selection: 'Over 3.5' },
+  772: { market: 'Corners Away', selection: 'Under 3.5' },
+  773: { market: 'Corners Away', selection: 'Over 4.5' },
+  774: { market: 'Corners Away', selection: 'Under 4.5' },
+  775: { market: 'Corners Away', selection: 'Over 5.5' },
+  776: { market: 'Corners Away', selection: 'Under 5.5' },
+  
+  // ===== SHOTS ON TARGET - Tiri in porta =====
+  // Total
   7778: { market: 'Shots On Target', selection: 'Over 5.5' },
   7779: { market: 'Shots On Target', selection: 'Under 5.5' },
   7780: { market: 'Shots On Target', selection: 'Over 6.5' },
   7781: { market: 'Shots On Target', selection: 'Under 6.5' },
+  7782: { market: 'Shots On Target', selection: 'Over 7.5' },
+  7783: { market: 'Shots On Target', selection: 'Under 7.5' },
+  7784: { market: 'Shots On Target', selection: 'Over 8.5' },
+  7785: { market: 'Shots On Target', selection: 'Under 8.5' },
+  // Home team shots on target
+  7810: { market: 'Shots On Target Home', selection: 'Over 2.5' },
+  7811: { market: 'Shots On Target Home', selection: 'Under 2.5' },
+  7812: { market: 'Shots On Target Home', selection: 'Over 3.5' },
+  7813: { market: 'Shots On Target Home', selection: 'Under 3.5' },
+  7814: { market: 'Shots On Target Home', selection: 'Over 4.5' },
+  7815: { market: 'Shots On Target Home', selection: 'Under 4.5' },
+  // Away team shots on target
+  7820: { market: 'Shots On Target Away', selection: 'Over 2.5' },
+  7821: { market: 'Shots On Target Away', selection: 'Under 2.5' },
+  7822: { market: 'Shots On Target Away', selection: 'Over 3.5' },
+  7823: { market: 'Shots On Target Away', selection: 'Under 3.5' },
+  7824: { market: 'Shots On Target Away', selection: 'Over 4.5' },
+  7825: { market: 'Shots On Target Away', selection: 'Under 4.5' },
+  
+  // ===== SHOTS TOTAL - Tiri totali =====
+  // Total
+  7786: { market: 'Shots', selection: 'Over 20.5' },
+  7787: { market: 'Shots', selection: 'Under 20.5' },
+  7788: { market: 'Shots', selection: 'Over 22.5' },
+  7789: { market: 'Shots', selection: 'Under 22.5' },
+  7790: { market: 'Shots', selection: 'Over 24.5' },
+  7791: { market: 'Shots', selection: 'Under 24.5' },
+  // Home team shots
+  7830: { market: 'Shots Home', selection: 'Over 10.5' },
+  7831: { market: 'Shots Home', selection: 'Under 10.5' },
+  7832: { market: 'Shots Home', selection: 'Over 11.5' },
+  7833: { market: 'Shots Home', selection: 'Under 11.5' },
+  7834: { market: 'Shots Home', selection: 'Over 12.5' },
+  7835: { market: 'Shots Home', selection: 'Under 12.5' },
+  // Away team shots
+  7840: { market: 'Shots Away', selection: 'Over 10.5' },
+  7841: { market: 'Shots Away', selection: 'Under 10.5' },
+  7842: { market: 'Shots Away', selection: 'Over 11.5' },
+  7843: { market: 'Shots Away', selection: 'Under 11.5' },
+  7844: { market: 'Shots Away', selection: 'Over 12.5' },
+  7845: { market: 'Shots Away', selection: 'Under 12.5' },
+  
+  // ===== FOULS - Falli =====
+  // Total
+  7792: { market: 'Fouls', selection: 'Over 20.5' },
+  7793: { market: 'Fouls', selection: 'Under 20.5' },
+  7794: { market: 'Fouls', selection: 'Over 22.5' },
+  7795: { market: 'Fouls', selection: 'Under 22.5' },
+  7796: { market: 'Fouls', selection: 'Over 24.5' },
+  7797: { market: 'Fouls', selection: 'Under 24.5' },
+  // Home team fouls
+  7850: { market: 'Fouls Home', selection: 'Over 10.5' },
+  7851: { market: 'Fouls Home', selection: 'Under 10.5' },
+  7852: { market: 'Fouls Home', selection: 'Over 11.5' },
+  7853: { market: 'Fouls Home', selection: 'Under 11.5' },
+  7854: { market: 'Fouls Home', selection: 'Over 12.5' },
+  7855: { market: 'Fouls Home', selection: 'Under 12.5' },
+  // Away team fouls
+  7860: { market: 'Fouls Away', selection: 'Over 10.5' },
+  7861: { market: 'Fouls Away', selection: 'Under 10.5' },
+  7862: { market: 'Fouls Away', selection: 'Over 11.5' },
+  7863: { market: 'Fouls Away', selection: 'Under 11.5' },
+  7864: { market: 'Fouls Away', selection: 'Over 12.5' },
+  7865: { market: 'Fouls Away', selection: 'Under 12.5' },
+  
+  // ===== OFFSIDES - Fuorigiochi =====
+  // Total
+  7798: { market: 'Offsides', selection: 'Over 2.5' },
+  7799: { market: 'Offsides', selection: 'Under 2.5' },
+  7800: { market: 'Offsides', selection: 'Over 3.5' },
+  7801: { market: 'Offsides', selection: 'Under 3.5' },
+  7802: { market: 'Offsides', selection: 'Over 4.5' },
+  7803: { market: 'Offsides', selection: 'Under 4.5' },
+  // Home team offsides
+  7870: { market: 'Offsides Home', selection: 'Over 1.5' },
+  7871: { market: 'Offsides Home', selection: 'Under 1.5' },
+  7872: { market: 'Offsides Home', selection: 'Over 2.5' },
+  7873: { market: 'Offsides Home', selection: 'Under 2.5' },
+  // Away team offsides
+  7880: { market: 'Offsides Away', selection: 'Over 1.5' },
+  7881: { market: 'Offsides Away', selection: 'Under 1.5' },
+  7882: { market: 'Offsides Away', selection: 'Over 2.5' },
+  7883: { market: 'Offsides Away', selection: 'Under 2.5' },
 };
 
 function map1xbetBetId(betId) {
@@ -69,20 +178,35 @@ function map1xbetBetId(betId) {
   return { market: `Bet${betId}`, selection: 'Unknown' };
 }
 
-// Sisal codiceScommessa mapping (Italian market codes)
+// Sisal codiceScommessa mapping - STATISTICAL MARKETS (Total + Team-specific)
+// Note: Team-specific codes need discovery from live data
 const SISAL_MARKETS = {
-  3: '1X2',                    // Esito finale
-  4: 'Under/Over',             // Under/Over
-  8: 'Double Chance',          // Doppia Chance
-  14: 'Handicap',              // Handicap
-  18: 'BTTS',                  // Goal/No Goal
-  127: '1X2',                  // Esito 1X2
-  7989: 'Under/Over',          // Under/Over totale
-  8333: 'Handicap',            // Handicap Asiatico
-  9942: 'Corners',             // Calci d'angolo
-  15911: 'Cards',              // Ammonizioni
-  21605: 'Stats',              // Statistiche
-  28319: 'Shots',              // Tiri in porta
+  // ===== CORNERS - Calci d'angolo =====
+  9942: 'Corners',               // Totale
+  9943: 'Corners Home',          // Squadra casa
+  9944: 'Corners Away',          // Squadra trasferta
+  
+  // ===== SHOTS ON TARGET - Tiri in porta =====
+  28319: 'Shots On Target',      // Totale
+  28323: 'Shots On Target Home', // Squadra casa
+  28324: 'Shots On Target Away', // Squadra trasferta
+  
+  // ===== SHOTS - Tiri totali =====
+  28320: 'Shots',                // Totale
+  28325: 'Shots Home',           // Squadra casa
+  28326: 'Shots Away',           // Squadra trasferta
+  
+  // ===== FOULS - Falli =====
+  28321: 'Fouls',                // Totale
+  28327: 'Fouls Home',           // Squadra casa
+  28328: 'Fouls Away',           // Squadra trasferta
+  
+  // ===== OFFSIDES - Fuorigiochi =====
+  28322: 'Offsides',             // Totale
+  28329: 'Offsides Home',        // Squadra casa
+  28330: 'Offsides Away',        // Squadra trasferta
+  
+  // Note: Actual codes will be discovered from live feed
 };
 
 function mapSisalMarket(codice) {
@@ -406,6 +530,12 @@ async function processOutcomes(data) {
       
       // Only process if we have valid bookmakerId (must be 21 or 103) and odds
       const validBookmakers = [21, 103]; // 1xbet, Sisal
+      
+      // CRITICAL: Only save STATISTICAL MARKETS - discard everything else!
+      if (!isStatisticalMarket(marketType)) {
+        continue; // Skip non-statistical markets
+      }
+      
       if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === 'number' && odds > 1 && odds < 1000) {
         oddsRecords.push({
           event_id: eventIdForStorage,
