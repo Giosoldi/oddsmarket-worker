@@ -353,6 +353,11 @@ setInterval(() => {
 // Store events temporarily by ID for reference
 const eventsCache = new Map();
 
+// Buffer for outcomes that arrived before their events
+const pendingOutcomes = [];
+const PENDING_BUFFER_MAX = 1000;
+const PENDING_PROCESS_INTERVAL = 2000; // Process pending every 2 seconds
+
 // OddsMarket uses compact array format. Based on observed data:
 // bookmaker_events array: [eventId, bookmakerId, active, timestamp, eventName, sportId, league, ...]
 // outcomes array: strings like "MTg5OTMxMjIwNnw0MDQs..." which are base64 encoded
@@ -486,9 +491,13 @@ async function processOutcomes(data) {
       const eventInfo = eventsCache.get(String(internalEventId)) || {};
       const bookmakerId = eventInfo.bookmakerId;
       
-      // DEBUG: Log cache hit/miss for first few outcomes
-      if (Math.random() < 0.01) { // Log 1% of lookups
-        console.log(`🔍 Cache lookup: internalId=${internalEventId}, found=${!!eventInfo.name}, cached=${eventsCache.size} total`);
+      // If no event info found, buffer this outcome for later processing
+      if (!eventInfo.bookmakerId) {
+        // Store raw outcome for reprocessing
+        if (pendingOutcomes.length < PENDING_BUFFER_MAX) {
+          pendingOutcomes.push(outcome);
+        }
+        continue;
       }
       
       // Extract external eventId for storage (for matching across bookmakers)
@@ -506,11 +515,9 @@ async function processOutcomes(data) {
         // --- BOOKMAKER-SPECIFIC PARSING ---
         if (bookmakerId === 21) {
           // 1xbet: uses betId for market/selection
-          // betId encodes both market type and selection
           const betMatch = infoString.match(/betId=(\d+)/);
           if (betMatch) {
             const betId = parseInt(betMatch[1]);
-            // Map common 1xbet betIds to standardized market codes
             const mapped = map1xbetBetId(betId);
             marketType = mapped.market;
             selection = mapped.selection;
@@ -521,7 +528,6 @@ async function processOutcomes(data) {
           const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
           if (marketMatch) {
             const codice = parseInt(marketMatch[1]);
-            // Map Sisal market codes to standardized format
             marketType = mapSisalMarket(codice);
           }
           if (esitoMatch) {
@@ -533,23 +539,16 @@ async function processOutcomes(data) {
       // Use external eventId for storage (to match across different bookmakers)
       const eventIdForStorage = externalEventId || String(internalEventId);
       
-      // Only process if we have valid bookmakerId (must be 21 or 103) and odds
-      const validBookmakers = [21, 103]; // 1xbet, Sisal
+      // Only process valid bookmakers
+      const validBookmakers = [21, 103];
       
-      // CRITICAL: Only save STATISTICAL MARKETS - discard everything else!
+      // CRITICAL: Only save STATISTICAL MARKETS
       if (!isStatisticalMarket(marketType)) {
-        continue; // Skip non-statistical markets
+        continue;
       }
       
       if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === 'number' && odds > 1 && odds < 1000) {
-        // IMPORTANT: Use the event name from cache (looked up via internalEventId)
-        // eventInfo is already populated above using internalEventId
         const eventName = eventInfo.name || `Event ${eventIdForStorage}`;
-        
-        // DEBUG: Log when we have proper names vs fallback
-        if (!eventInfo.name) {
-          console.log(`⚠️ No cached name for internal ID ${internalEventId}, using fallback`);
-        }
         
         oddsRecords.push({
           event_id: eventIdForStorage,
@@ -571,8 +570,11 @@ async function processOutcomes(data) {
   if (oddsRecords.length > 0) {
     console.log(`✅ Parsed ${oddsRecords.length} outcome records, saving...`);
     await saveOddsRecords(oddsRecords);
-  } else {
-    console.log('⚠️ No valid outcomes parsed from', outcomes.length, 'items');
+  }
+  
+  // Log pending buffer status
+  if (pendingOutcomes.length > 0) {
+    console.log(`📦 Buffered ${pendingOutcomes.length} outcomes waiting for event cache`);
   }
 }
 
@@ -636,6 +638,96 @@ async function processBookmakerEvents(data) {
     const keysToDelete = [...eventsCache.keys()].slice(0, 1000);
     keysToDelete.forEach(k => eventsCache.delete(k));
     console.log('🧹 Cleaned event cache, new size:', eventsCache.size);
+  }
+  
+  // Process any pending outcomes now that we have more events
+  if (pendingOutcomes.length > 0 && added > 0) {
+    await processPendingOutcomes();
+  }
+}
+
+// Process buffered outcomes that were waiting for event cache
+async function processPendingOutcomes() {
+  if (pendingOutcomes.length === 0) return;
+  
+  console.log(`🔄 Processing ${pendingOutcomes.length} pending outcomes...`);
+  
+  const toProcess = pendingOutcomes.splice(0, pendingOutcomes.length);
+  const oddsRecords = [];
+  let stillPending = 0;
+  
+  for (const outcome of toProcess) {
+    if (!Array.isArray(outcome) || outcome.length < 12) continue;
+    
+    const internalEventId = outcome[1];
+    const odds = outcome[11];
+    const infoString = outcome[15];
+    const period = outcome[3] || 'Regular time';
+    
+    const eventInfo = eventsCache.get(String(internalEventId)) || {};
+    const bookmakerId = eventInfo.bookmakerId;
+    
+    // Still no event info? Re-buffer (up to limit)
+    if (!eventInfo.bookmakerId) {
+      if (stillPending < 100) {
+        pendingOutcomes.push(outcome);
+        stillPending++;
+      }
+      continue;
+    }
+    
+    let externalEventId = null;
+    let marketType = period;
+    let selection = 'Unknown';
+    
+    if (typeof infoString === 'string') {
+      const eventMatch = infoString.match(/eventId=(\d+)/);
+      if (eventMatch) externalEventId = eventMatch[1];
+      
+      if (bookmakerId === 21) {
+        const betMatch = infoString.match(/betId=(\d+)/);
+        if (betMatch) {
+          const mapped = map1xbetBetId(parseInt(betMatch[1]));
+          marketType = mapped.market;
+          selection = mapped.selection;
+        }
+      } else if (bookmakerId === 103) {
+        const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
+        const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
+        if (marketMatch) marketType = mapSisalMarket(parseInt(marketMatch[1]));
+        if (esitoMatch) selection = mapSisalSelection(esitoMatch[1]);
+      }
+    }
+    
+    const eventIdForStorage = externalEventId || String(internalEventId);
+    const validBookmakers = [21, 103];
+    
+    if (!isStatisticalMarket(marketType)) continue;
+    
+    if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === 'number' && odds > 1 && odds < 1000) {
+      oddsRecords.push({
+        event_id: eventIdForStorage,
+        event_name: eventInfo.name || `Event ${eventIdForStorage}`,
+        event_time: eventInfo.startsAt || null,
+        league: eventInfo.league || 'Soccer',
+        sport_id: SPORT_ID,
+        bookmaker_id: bookmakerId,
+        bookmaker_name: getBookmakerName(bookmakerId),
+        market_type: String(marketType),
+        selection: selection,
+        odds: parseFloat(odds),
+        updated_at: new Date().toISOString()
+      });
+    }
+  }
+  
+  if (oddsRecords.length > 0) {
+    console.log(`✅ Recovered ${oddsRecords.length} records from pending buffer`);
+    await saveOddsRecords(oddsRecords);
+  }
+  
+  if (stillPending > 0) {
+    console.log(`📦 Still ${stillPending} outcomes pending`);
   }
 }
 
