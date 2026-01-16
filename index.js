@@ -251,22 +251,27 @@ async function processOutcomes(data) {
     }
     // Handle ARRAY format - OddsMarket uses 18-element arrays
     // Format: [encodedId, internalEventId, ?, period, marketTypeId, ?, ?, null, ?, null, bool, ODDS, ?, bool, ?, "eventId=X&...", timestamp, null]
-    // Note: bookmakerId is NOT in the outcome array - it comes from eventsCache!
+    // IMPORTANT: internalEventId at index 1 matches what we get from bookmaker_events!
     else if (Array.isArray(outcome) && outcome.length >= 12) {
+      const internalEventId = outcome[1]; // This matches bookmaker_events[0]!
       const odds = outcome[11]; // Odds at index 11
-      const infoString = outcome[15]; // Contains eventId and market details
+      const infoString = outcome[15]; // Contains external eventId and market details
       const period = outcome[3] || 'Regular time';
       
-      // Extract eventId from info string like "eventId=295526161&sportId=1&..."
-      let eventId = null;
+      // Get bookmaker from events cache using INTERNAL event ID
+      const eventInfo = eventsCache.get(String(internalEventId)) || {};
+      const bookmakerId = eventInfo.bookmakerId;
+      
+      // Extract external eventId for storage (for matching across bookmakers)
+      let externalEventId = null;
       let marketType = period;
       let selection = 'Unknown';
       
       if (typeof infoString === 'string') {
-        // Parse eventId
+        // Parse external eventId (used by the bookmaker)
         const eventMatch = infoString.match(/eventId=(\d+)/);
         if (eventMatch) {
-          eventId = eventMatch[1];
+          externalEventId = eventMatch[1];
         }
         
         // Parse selection/bet type from selectionId or betId
@@ -288,15 +293,14 @@ async function processOutcomes(data) {
         }
       }
       
-      // Get bookmaker from events cache (set by bookmaker_events messages)
-      const eventInfo = eventsCache.get(String(eventId)) || {};
-      const bookmakerId = eventInfo.bookmakerId;
+      // Use external eventId for storage (to match across different bookmakers)
+      const eventIdForStorage = externalEventId || String(internalEventId);
       
-      // Only process if we have valid eventId, bookmakerId, and odds
-      if (eventId && bookmakerId && typeof odds === 'number' && odds > 1 && odds < 1000) {
+      // Only process if we have valid bookmakerId and odds
+      if (bookmakerId && typeof odds === 'number' && odds > 1 && odds < 1000) {
         oddsRecords.push({
-          event_id: String(eventId),
-          event_name: eventInfo.name || `Event ${eventId}`,
+          event_id: eventIdForStorage,
+          event_name: eventInfo.name || `Event ${eventIdForStorage}`,
           event_time: eventInfo.startsAt || null,
           league: eventInfo.league || 'Soccer',
           sport_id: SPORT_ID,
