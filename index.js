@@ -296,8 +296,9 @@ async function processOutcomes(data) {
       // Use external eventId for storage (to match across different bookmakers)
       const eventIdForStorage = externalEventId || String(internalEventId);
       
-      // Only process if we have valid bookmakerId and odds
-      if (bookmakerId && typeof odds === 'number' && odds > 1 && odds < 1000) {
+      // Only process if we have valid bookmakerId (must be 21 or 103) and odds
+      const validBookmakers = [21, 103]; // 1xbet, Sisal
+      if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === 'number' && odds > 1 && odds < 1000) {
         oddsRecords.push({
           event_id: eventIdForStorage,
           event_name: eventInfo.name || `Event ${eventIdForStorage}`,
