@@ -489,11 +489,21 @@ async function processOutcomes(data) {
       
       // Get bookmaker from events cache using INTERNAL event ID
       const eventInfo = eventsCache.get(String(internalEventId)) || {};
-      const bookmakerId = eventInfo.bookmakerId;
+      let bookmakerId = eventInfo.bookmakerId;
+      let eventName = eventInfo.name;
       
-      // If no event info found, buffer this outcome for later processing
-      if (!eventInfo.bookmakerId) {
-        // Store raw outcome for reprocessing
+      // CRITICAL FIX: If no bookmakerId from cache, detect from info string
+      // Sisal uses "codiceScommessa", 1xbet uses "betId"
+      if (!bookmakerId && typeof infoString === 'string') {
+        if (infoString.includes('codiceScommessa=')) {
+          bookmakerId = 103; // Sisal
+        } else if (infoString.includes('betId=')) {
+          bookmakerId = 21; // 1xbet
+        }
+      }
+      
+      // If still no bookmakerId, buffer for later
+      if (!bookmakerId) {
         if (pendingOutcomes.length < PENDING_BUFFER_MAX) {
           pendingOutcomes.push(outcome);
         }
@@ -548,11 +558,12 @@ async function processOutcomes(data) {
       }
       
       if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === 'number' && odds > 1 && odds < 1000) {
-        const eventName = eventInfo.name || `Event ${eventIdForStorage}`;
+        // Use eventName from cache if available, otherwise use Event ID as fallback
+        const finalEventName = eventName || `Event ${eventIdForStorage}`;
         
         oddsRecords.push({
           event_id: eventIdForStorage,
-          event_name: eventName,
+          event_name: finalEventName,
           event_time: eventInfo.startsAt || null,
           league: eventInfo.league || 'Soccer',
           sport_id: SPORT_ID,
@@ -665,10 +676,20 @@ async function processPendingOutcomes() {
     const period = outcome[3] || 'Regular time';
     
     const eventInfo = eventsCache.get(String(internalEventId)) || {};
-    const bookmakerId = eventInfo.bookmakerId;
+    let bookmakerId = eventInfo.bookmakerId;
+    let eventName = eventInfo.name;
     
-    // Still no event info? Re-buffer (up to limit)
-    if (!eventInfo.bookmakerId) {
+    // Detect bookmaker from info string if not in cache
+    if (!bookmakerId && typeof infoString === 'string') {
+      if (infoString.includes('codiceScommessa=')) {
+        bookmakerId = 103; // Sisal
+      } else if (infoString.includes('betId=')) {
+        bookmakerId = 21; // 1xbet
+      }
+    }
+    
+    // Still no bookmakerId? Re-buffer (up to limit)
+    if (!bookmakerId) {
       if (stillPending < 100) {
         pendingOutcomes.push(outcome);
         stillPending++;
