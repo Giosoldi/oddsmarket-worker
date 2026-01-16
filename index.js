@@ -150,7 +150,9 @@ async function processOutcomes(data) {
       console.log('First outcome data:', JSON.stringify(first).substring(0, 500));
     } else if (Array.isArray(first)) {
       console.log('First outcome is array, length:', first.length);
-      console.log('First outcome array:', JSON.stringify(first).substring(0, 300));
+      console.log('First outcome array:', JSON.stringify(first).substring(0, 500));
+      // Log key indices for debugging bookmaker extraction
+      console.log('Index 1 (bookmakerId?):', first[1], 'Index 11 (odds?):', first[11], 'Index 15 (info?):', typeof first[15] === 'string' ? first[15].substring(0, 100) : first[15]);
     } else if (typeof first === 'string') {
       console.log('First outcome (raw):', first.substring(0, 100));
     }
@@ -248,33 +250,48 @@ async function processOutcomes(data) {
       }
     }
     // Handle ARRAY format - OddsMarket uses 18-element arrays
-    // Format: [encodedId, internalId, ?, period, marketTypeId, ?, ?, null, ?, null, bool, ODDS, ?, bool, ?, "eventId=X&betValue=Y&betId=Z", timestamp, null]
+    // Format: [encodedId, bookmakerId, ?, period, marketTypeId, ?, ?, null, ?, null, bool, ODDS, ?, bool, ?, "eventId=X&...", timestamp, null]
+    // Note: bookmakerId is at index 1 (second element)!
     else if (Array.isArray(outcome) && outcome.length >= 12) {
+      const bookmakerId = outcome[1]; // Bookmaker ID at index 1!
       const odds = outcome[11]; // Odds at index 11
-      const infoString = outcome[15]; // Contains eventId
+      const infoString = outcome[15]; // Contains eventId and market details
       const period = outcome[3] || 'Regular time';
       
-      // Extract eventId from info string like "eventId=295526161&betValue=&betId=2"
+      // Extract eventId from info string like "eventId=295526161&sportId=1&..."
       let eventId = null;
-      if (typeof infoString === 'string' && infoString.includes('eventId=')) {
-        const match = infoString.match(/eventId=(\d+)/);
-        if (match) {
-          eventId = match[1];
+      let marketType = period;
+      let selection = 'Unknown';
+      
+      if (typeof infoString === 'string') {
+        // Parse eventId
+        const eventMatch = infoString.match(/eventId=(\d+)/);
+        if (eventMatch) {
+          eventId = eventMatch[1];
+        }
+        
+        // Parse selection/bet type from selectionId or betId
+        const selMatch = infoString.match(/selectionId=(\d+)/);
+        const betMatch = infoString.match(/betId=(\d+)/);
+        if (selMatch) {
+          selection = `Selection ${selMatch[1]}`;
+        } else if (betMatch) {
+          selection = `Bet ${betMatch[1]}`;
+        }
+        
+        // Parse market type from codiceClasseEsito or codiceScommessa
+        const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
+        const classeMatch = infoString.match(/codiceClasseEsito=(\d+)/);
+        if (marketMatch) {
+          marketType = `Market ${marketMatch[1]}`;
+        } else if (classeMatch) {
+          marketType = `Classe ${classeMatch[1]}`;
         }
       }
       
-      // Only process if we have valid odds (decimal > 1)
-      if (eventId && typeof odds === 'number' && odds > 1 && odds < 1000) {
+      // Only process if we have valid bookmaker, eventId, and odds
+      if (eventId && typeof bookmakerId === 'number' && typeof odds === 'number' && odds > 1 && odds < 1000) {
         const eventInfo = eventsCache.get(String(eventId)) || {};
-        
-        // Extract selection/bet type from betId if available
-        let selection = 'Unknown';
-        if (typeof infoString === 'string') {
-          const betMatch = infoString.match(/betId=(\d+)/);
-          if (betMatch) {
-            selection = `Bet ${betMatch[1]}`;
-          }
-        }
         
         oddsRecords.push({
           event_id: String(eventId),
@@ -282,9 +299,9 @@ async function processOutcomes(data) {
           event_time: eventInfo.startsAt || null,
           league: eventInfo.league || 'Soccer',
           sport_id: SPORT_ID,
-          bookmaker_id: eventInfo.bookmakerId || 21,
-          bookmaker_name: getBookmakerName(eventInfo.bookmakerId || 21),
-          market_type: String(period),
+          bookmaker_id: bookmakerId,
+          bookmaker_name: getBookmakerName(bookmakerId),
+          market_type: String(marketType),
           selection: selection,
           odds: parseFloat(odds),
           updated_at: new Date().toISOString()
@@ -308,6 +325,7 @@ async function processBookmakerEvents(data) {
   
   const events = Array.isArray(data) ? data : [data];
   let added = 0;
+  const bookmakerCounts = {};
   
   for (const event of events) {
     if (!event) continue;
@@ -336,7 +354,7 @@ async function processBookmakerEvents(data) {
       bookmakerId = event.bookmaker_id || event.bookmakerId;
     }
     
-    if (eventId) {
+    if (eventId && bookmakerId) {
       eventsCache.set(String(eventId), {
         name: eventName,
         startsAt: startsAt,
@@ -344,10 +362,16 @@ async function processBookmakerEvents(data) {
         bookmakerId: bookmakerId
       });
       added++;
+      
+      // Track bookmaker distribution
+      const bmName = getBookmakerName(bookmakerId);
+      bookmakerCounts[bmName] = (bookmakerCounts[bmName] || 0) + 1;
     }
   }
   
-  console.log(`✅ Event cache updated: +${added} events, total: ${eventsCache.size}`);
+  // Log which bookmakers we're receiving events from
+  const bmSummary = Object.entries(bookmakerCounts).map(([k, v]) => `${k}:${v}`).join(', ');
+  console.log(`✅ Event cache updated: +${added} events, total: ${eventsCache.size} | Bookmakers: ${bmSummary || 'none'}`);
   
   // Keep cache clean (max 5000 events)
   if (eventsCache.size > 5000) {
