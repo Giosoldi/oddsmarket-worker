@@ -1295,19 +1295,30 @@ async function processOddsData(data) {
 const writeQueue = [];
 let isProcessingQueue = false;
 
-const BATCH_SIZE = 25; // Maximum records per upsert
-const WRITE_DELAY_MS = 400; // Mandatory delay between writes (300-500ms range)
+const BATCH_SIZE = 50; // Increased batch size for faster processing
+const WRITE_DELAY_MS = 200; // Reduced delay (still safe)
 const MAX_RETRIES = 2; // Maximum retry attempts per batch
 const RETRY_DELAYS = [300, 600]; // Backoff delays for retries (ms)
+const MAX_QUEUE_SIZE = 5000; // Maximum queue size before dropping old records
 
 // Helper function to sleep
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Add records to the global write queue
+// Add records to the global write queue with backpressure
 function enqueueWrite(records) {
   if (!records || records.length === 0) return;
+  
+  // BACKPRESSURE: If queue is too large, drop oldest records
+  if (writeQueue.length > MAX_QUEUE_SIZE) {
+    const toDrop = writeQueue.length - MAX_QUEUE_SIZE + records.length;
+    if (toDrop > 0) {
+      writeQueue.splice(0, toDrop);
+      console.warn(`⚠️ BACKPRESSURE: Dropped ${toDrop} oldest records, queue was overflowing`);
+    }
+  }
+  
   writeQueue.push(...records);
   console.log(`📥 Enqueued ${records.length} records, queue size: ${writeQueue.length}`);
   
@@ -1331,9 +1342,10 @@ async function processWriteQueue() {
     // Execute single upsert with retry
     await executeSingleUpsert(batch);
     
-    // MANDATORY delay before next write
+    // Delay before next write (shorter when queue is large)
     if (writeQueue.length > 0) {
-      await sleep(WRITE_DELAY_MS);
+      const dynamicDelay = writeQueue.length > 1000 ? 100 : WRITE_DELAY_MS;
+      await sleep(dynamicDelay);
     }
   }
   
