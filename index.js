@@ -578,15 +578,15 @@ async function processOutcomes(data) {
               }
             }
 
-            // Handle H2H markets - betValue indicates selection (1=Home, 2=Away, 0=Draw)
+            // Handle H2H markets - betValue indicates selection (1=Home, 2=Away, 3=Draw)
             if (mapped.isH2H && betValueMatch) {
               const betValue = parseFloat(betValueMatch[1]);
               if (betValue === 1) {
                 selection = "1"; // Home wins
               } else if (betValue === 2) {
                 selection = "2"; // Away wins
-              } else if (betValue === 0) {
-                selection = "X"; // Draw
+              } else if (betValue === 0 || betValue === 3) {
+                selection = "X"; // Draw (both 0 and 3 map to X for Sisal compatibility)
               } else {
                 selection = String(betValue); // Fallback
               }
