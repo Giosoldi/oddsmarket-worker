@@ -367,6 +367,70 @@ const pendingOutcomes = [];
 const PENDING_BUFFER_MAX = 1000;
 const PENDING_PROCESS_INTERVAL = 2000; // Process pending every 2 seconds
 
+// ============ LEAGUE TRACKING FOR DEBUGGING ============
+// Track events by bookmaker and league for diagnostics
+const leagueStats = {
+  "1xbet": {},
+  "Sisal": {},
+};
+let lastLeagueLogTime = Date.now();
+const LEAGUE_LOG_INTERVAL = 60000; // Log every 60 seconds
+
+function trackEventByLeague(bookmakerId, league, eventName) {
+  const bmName = bookmakerId === 21 ? "1xbet" : bookmakerId === 103 ? "Sisal" : "Other";
+  if (!leagueStats[bmName]) return;
+  
+  const normalizedLeague = league || "Unknown";
+  if (!leagueStats[bmName][normalizedLeague]) {
+    leagueStats[bmName][normalizedLeague] = { count: 0, samples: [] };
+  }
+  leagueStats[bmName][normalizedLeague].count++;
+  
+  // Keep max 3 sample event names per league
+  if (leagueStats[bmName][normalizedLeague].samples.length < 3) {
+    leagueStats[bmName][normalizedLeague].samples.push(eventName);
+  }
+}
+
+function logLeagueStats() {
+  const now = Date.now();
+  if (now - lastLeagueLogTime < LEAGUE_LOG_INTERVAL) return;
+  lastLeagueLogTime = now;
+  
+  console.log("\n========== LEAGUE DISTRIBUTION REPORT ==========");
+  
+  for (const [bookmaker, leagues] of Object.entries(leagueStats)) {
+    const sortedLeagues = Object.entries(leagues)
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 15); // Top 15 leagues
+    
+    console.log(`\n📚 ${bookmaker} - ${sortedLeagues.length} leagues:`);
+    
+    for (const [league, data] of sortedLeagues) {
+      console.log(`   ${data.count.toString().padStart(4)} events | ${league}`);
+      if (data.samples.length > 0) {
+        console.log(`         Sample: ${data.samples[0]}`);
+      }
+    }
+  }
+  
+  // Check for common leagues between bookmakers
+  const onexbetLeagues = new Set(Object.keys(leagueStats["1xbet"]));
+  const sisalLeagues = new Set(Object.keys(leagueStats["Sisal"]));
+  const commonLeagues = [...onexbetLeagues].filter(l => sisalLeagues.has(l));
+  
+  console.log(`\n🔗 Common leagues: ${commonLeagues.length}`);
+  if (commonLeagues.length > 0) {
+    commonLeagues.slice(0, 10).forEach(l => {
+      const count1x = leagueStats["1xbet"][l]?.count || 0;
+      const countSisal = leagueStats["Sisal"][l]?.count || 0;
+      console.log(`   ${l}: 1xbet=${count1x}, Sisal=${countSisal}`);
+    });
+  }
+  
+  console.log("=================================================\n");
+}
+
 // OddsMarket uses compact array format. Based on observed data:
 // bookmaker_events array: [eventId, bookmakerId, active, timestamp, eventName, sportId, league, ...]
 // outcomes array: strings like "MTg5OTMxMjIwNnw0MDQs..." which are base64 encoded
@@ -737,6 +801,9 @@ async function processBookmakerEvents(data) {
       // Track bookmaker distribution
       const bmName = getBookmakerName(bookmakerId);
       bookmakerCounts[bmName] = (bookmakerCounts[bmName] || 0) + 1;
+      
+      // Track league distribution for debugging
+      trackEventByLeague(bookmakerId, league, eventName);
     }
   }
 
@@ -747,6 +814,9 @@ async function processBookmakerEvents(data) {
   console.log(
     `✅ Event cache updated: +${added} events, total: ${eventsCache.size} | Bookmakers: ${bmSummary || "none"}`,
   );
+  
+  // Periodically log league stats
+  logLeagueStats();
 
   // Keep cache clean (max 5000 events)
   if (eventsCache.size > 5000) {
