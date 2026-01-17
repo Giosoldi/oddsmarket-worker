@@ -1288,27 +1288,173 @@ async function processOddsData(data) {
   }
 }
 
+// ============ BATCHING CONFIGURATION ============
+const BATCH_SIZE = 25; // Maximum records per upsert (reduced from 80-150)
+const BATCH_DELAY_MS = 150; // Delay between batches (ms)
+const MAX_RETRIES = 2; // Maximum retry attempts per batch
+const RETRY_DELAYS = [200, 500]; // Backoff delays for retries (ms)
+
+// Helper function to sleep
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============ CHANGE DETECTION ============
+// Track recent upserts to avoid redundant writes
+const recentUpserts = new Map();
+const UPSERT_CACHE_TTL = 30000; // 30 seconds
+
+function getRecordHash(record) {
+  return `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}|${record.odds}`;
+}
+
+function hasRecordChanged(record) {
+  const hash = getRecordHash(record);
+  const key = `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}`;
+  
+  const cached = recentUpserts.get(key);
+  if (cached && cached.hash === hash && Date.now() - cached.time < UPSERT_CACHE_TTL) {
+    return false; // Record unchanged
+  }
+  
+  // Update cache
+  recentUpserts.set(key, { hash, time: Date.now() });
+  return true;
+}
+
+// Periodically clean upsert cache
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of recentUpserts.entries()) {
+    if (now - value.time > UPSERT_CACHE_TTL * 2) {
+      recentUpserts.delete(key);
+    }
+  }
+}, 60000);
+
+// ============ OPTIMIZED SAVE FUNCTION ============
 async function saveOddsRecords(oddsRecords) {
-  // Deduplicate records by unique key before upserting
+  const startTime = Date.now();
+  
+  // Step 1: Deduplicate records by unique key
   const uniqueMap = new Map();
   for (const record of oddsRecords) {
     const key = `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}`;
-    // Keep the latest record (last one wins)
     uniqueMap.set(key, record);
   }
 
   const uniqueRecords = Array.from(uniqueMap.values());
-  console.log(`Upserting ${uniqueRecords.length} unique records to Supabase (from ${oddsRecords.length} total)...`);
+  
+  // Step 2: Filter out unchanged records (avoid redundant writes)
+  const changedRecords = uniqueRecords.filter(hasRecordChanged);
+  
+  if (changedRecords.length === 0) {
+    console.log(`⏭️ No changed records to upsert (${uniqueRecords.length} duplicates filtered)`);
+    return;
+  }
+  
+  console.log(`📊 Processing ${changedRecords.length} changed records (${uniqueRecords.length - changedRecords.length} unchanged filtered)`);
 
-  const { error } = await supabase.from("live_odds").upsert(uniqueRecords, {
-    onConflict: "event_id,bookmaker_id,market_type,selection",
-    ignoreDuplicates: false,
-  });
+  // Step 3: Split into batches
+  const batches = [];
+  for (let i = 0; i < changedRecords.length; i += BATCH_SIZE) {
+    batches.push(changedRecords.slice(i, i + BATCH_SIZE));
+  }
+  
+  console.log(`📦 Split into ${batches.length} batches of max ${BATCH_SIZE} records each`);
 
-  if (error) {
-    console.error("Error saving to Supabase:", error);
-  } else {
-    console.log(`✅ Saved ${uniqueRecords.length} odds records`);
+  // Step 4: Process batches sequentially with delays
+  let successCount = 0;
+  let failCount = 0;
+  
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const batch = batches[batchIndex];
+    const batchStart = Date.now();
+    let success = false;
+    
+    // Retry logic with backoff
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const { error } = await supabase.from("live_odds").upsert(batch, {
+          onConflict: "event_id,bookmaker_id,market_type,selection",
+          ignoreDuplicates: false,
+        });
+
+        if (error) {
+          throw error;
+        }
+        
+        success = true;
+        successCount += batch.length;
+        
+        const batchDuration = Date.now() - batchStart;
+        console.log(`✅ Batch ${batchIndex + 1}/${batches.length}: ${batch.length} records in ${batchDuration}ms`);
+        break;
+        
+      } catch (error) {
+        const errorMsg = error?.message || String(error);
+        const isRetryable = errorMsg.includes('fetch failed') || 
+                           errorMsg.includes('socket') || 
+                           errorMsg.includes('ECONNRESET') ||
+                           errorMsg.includes('timeout');
+        
+        if (attempt < MAX_RETRIES && isRetryable) {
+          const delay = RETRY_DELAYS[attempt] || 500;
+          console.log(`⚠️ Batch ${batchIndex + 1} attempt ${attempt + 1} failed, retrying in ${delay}ms: ${errorMsg}`);
+          await sleep(delay);
+        } else {
+          console.error(`❌ Batch ${batchIndex + 1} failed after ${attempt + 1} attempts: ${errorMsg}`);
+          failCount += batch.length;
+          break;
+        }
+      }
+    }
+    
+    // Delay between batches to prevent socket saturation
+    if (batchIndex < batches.length - 1) {
+      await sleep(BATCH_DELAY_MS);
+    }
+  }
+  
+  const totalDuration = Date.now() - startTime;
+  console.log(`🏁 Save complete: ${successCount} saved, ${failCount} failed in ${totalDuration}ms`);
+  
+  // Log match_key stats for cross-bookmaker matching verification
+  logMatchKeyStats(changedRecords);
+}
+
+// ============ MATCH KEY LOGGING ============
+function logMatchKeyStats(records) {
+  const matchKeyGroups = new Map();
+  
+  for (const record of records) {
+    if (record.match_key) {
+      if (!matchKeyGroups.has(record.match_key)) {
+        matchKeyGroups.set(record.match_key, { bookmakers: new Set(), eventName: record.event_name });
+      }
+      matchKeyGroups.get(record.match_key).bookmakers.add(record.bookmaker_name);
+    }
+  }
+  
+  // Find cross-bookmaker matches
+  const crossBookmakerMatches = [...matchKeyGroups.entries()]
+    .filter(([_, data]) => data.bookmakers.size > 1);
+  
+  if (crossBookmakerMatches.length > 0) {
+    console.log(`\n🔗 CROSS-BOOKMAKER MATCHES FOUND: ${crossBookmakerMatches.length}`);
+    crossBookmakerMatches.slice(0, 5).forEach(([matchKey, data]) => {
+      console.log(`   MATCH_KEY: ${matchKey}`);
+      console.log(`   Event: ${data.eventName}`);
+      console.log(`   Bookmakers: ${[...data.bookmakers].join(', ')}`);
+    });
+  }
+  
+  // Log new match_key creations
+  const matchKeysBy1xbet = records.filter(r => r.bookmaker_id === 21 && r.match_key).length;
+  const matchKeysBySisal = records.filter(r => r.bookmaker_id === 103 && r.match_key).length;
+  
+  if (matchKeysBy1xbet > 0 || matchKeysBySisal > 0) {
+    console.log(`📍 MATCH_KEY CREATED: 1xbet=${matchKeysBy1xbet}, Sisal=${matchKeysBySisal}`);
   }
 }
 
