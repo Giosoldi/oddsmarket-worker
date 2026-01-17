@@ -1288,36 +1288,153 @@ async function processOddsData(data) {
   }
 }
 
-// ============ BATCHING CONFIGURATION ============
-const BATCH_SIZE = 25; // Maximum records per upsert (reduced from 80-150)
-const BATCH_DELAY_MS = 150; // Delay between batches (ms)
+// ============ GLOBAL WRITE QUEUE ============
+// CRITICAL: All writes go through this queue to prevent socket saturation
+// Only ONE upsert at a time, with mandatory delay between writes
+
+const writeQueue = [];
+let isProcessingQueue = false;
+
+const BATCH_SIZE = 25; // Maximum records per upsert
+const WRITE_DELAY_MS = 400; // Mandatory delay between writes (300-500ms range)
 const MAX_RETRIES = 2; // Maximum retry attempts per batch
-const RETRY_DELAYS = [200, 500]; // Backoff delays for retries (ms)
+const RETRY_DELAYS = [300, 600]; // Backoff delays for retries (ms)
 
 // Helper function to sleep
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Add records to the global write queue
+function enqueueWrite(records) {
+  if (!records || records.length === 0) return;
+  writeQueue.push(...records);
+  console.log(`📥 Enqueued ${records.length} records, queue size: ${writeQueue.length}`);
+  
+  // Trigger processing if not already running
+  if (!isProcessingQueue) {
+    processWriteQueue();
+  }
+}
+
+// Process the write queue - ONE batch at a time
+async function processWriteQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+  
+  console.log(`🔄 Write queue processor started, ${writeQueue.length} records pending`);
+  
+  while (writeQueue.length > 0) {
+    // Take a batch from the queue
+    const batch = writeQueue.splice(0, BATCH_SIZE);
+    
+    // Execute single upsert with retry
+    await executeSingleUpsert(batch);
+    
+    // MANDATORY delay before next write
+    if (writeQueue.length > 0) {
+      await sleep(WRITE_DELAY_MS);
+    }
+  }
+  
+  isProcessingQueue = false;
+  console.log(`✅ Write queue processor finished`);
+}
+
+// Execute a single upsert with retry logic
+async function executeSingleUpsert(batch) {
+  const batchStart = Date.now();
+  
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const { error, data } = await supabase.from("live_odds").upsert(batch, {
+        onConflict: "event_id,bookmaker_id,market_type,selection",
+        ignoreDuplicates: false,
+      });
+
+      if (error) {
+        // Check for Cloudflare HTML error
+        const errorStr = error?.message || String(error);
+        if (isCloudflareError(errorStr)) {
+          console.warn(`⚠️ Cloudflare 522 error (batch of ${batch.length}), retrying...`);
+          throw new Error('CLOUDFLARE_522');
+        }
+        throw error;
+      }
+      
+      const duration = Date.now() - batchStart;
+      console.log(`✅ Upsert: ${batch.length} records in ${duration}ms`);
+      return true;
+      
+    } catch (error) {
+      const errorMsg = error?.message || String(error);
+      
+      // Handle Cloudflare HTML responses
+      if (isCloudflareError(errorMsg)) {
+        console.warn(`⚠️ Cloudflare error detected, attempt ${attempt + 1}/${MAX_RETRIES + 1}`);
+      }
+      
+      const isRetryable = errorMsg.includes('fetch failed') || 
+                         errorMsg.includes('socket') || 
+                         errorMsg.includes('ECONNRESET') ||
+                         errorMsg.includes('timeout') ||
+                         errorMsg.includes('CLOUDFLARE') ||
+                         errorMsg.includes('522');
+      
+      if (attempt < MAX_RETRIES && isRetryable) {
+        const delay = RETRY_DELAYS[attempt] || 600;
+        console.log(`⚠️ Upsert attempt ${attempt + 1} failed, retrying in ${delay}ms`);
+        await sleep(delay);
+      } else {
+        // Log concise error, not full HTML
+        const shortError = errorMsg.substring(0, 150);
+        console.error(`❌ Upsert failed after ${attempt + 1} attempts: ${shortError}`);
+        return false;
+      }
+    }
+  }
+  
+  return false;
+}
+
+// Detect Cloudflare HTML error responses
+function isCloudflareError(text) {
+  if (!text) return false;
+  const str = String(text).toLowerCase();
+  return str.includes('cloudflare') || 
+         str.includes('<!doctype') || 
+         str.includes('<html') ||
+         str.includes('522') ||
+         str.includes('error 522');
+}
+
 // ============ CHANGE DETECTION ============
 // Track recent upserts to avoid redundant writes
 const recentUpserts = new Map();
-const UPSERT_CACHE_TTL = 30000; // 30 seconds
+const UPSERT_CACHE_TTL = 60000; // 60 seconds (increased for better dedup)
+
+function getRecordKey(record) {
+  return `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}`;
+}
 
 function getRecordHash(record) {
-  return `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}|${record.odds}`;
+  // Include odds in hash to detect value changes
+  return `${record.odds}`;
 }
 
 function hasRecordChanged(record) {
+  const key = getRecordKey(record);
   const hash = getRecordHash(record);
-  const key = `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}`;
   
   const cached = recentUpserts.get(key);
-  if (cached && cached.hash === hash && Date.now() - cached.time < UPSERT_CACHE_TTL) {
-    return false; // Record unchanged
+  if (cached) {
+    // Record exists in cache - check if odds changed
+    if (cached.hash === hash && Date.now() - cached.time < UPSERT_CACHE_TTL) {
+      return false; // Odds unchanged, skip write
+    }
   }
   
-  // Update cache
+  // Record changed or new - update cache
   recentUpserts.set(key, { hash, time: Date.now() });
   return true;
 }
@@ -1325,10 +1442,15 @@ function hasRecordChanged(record) {
 // Periodically clean upsert cache
 setInterval(() => {
   const now = Date.now();
+  let cleaned = 0;
   for (const [key, value] of recentUpserts.entries()) {
     if (now - value.time > UPSERT_CACHE_TTL * 2) {
       recentUpserts.delete(key);
+      cleaned++;
     }
+  }
+  if (cleaned > 0) {
+    console.log(`🧹 Cleaned ${cleaned} stale cache entries, remaining: ${recentUpserts.size}`);
   }
 }, 60000);
 
@@ -1339,85 +1461,31 @@ async function saveOddsRecords(oddsRecords) {
   // Step 1: Deduplicate records by unique key
   const uniqueMap = new Map();
   for (const record of oddsRecords) {
-    const key = `${record.event_id}|${record.bookmaker_id}|${record.market_type}|${record.selection}`;
+    const key = getRecordKey(record);
     uniqueMap.set(key, record);
   }
 
   const uniqueRecords = Array.from(uniqueMap.values());
   
-  // Step 2: Filter out unchanged records (avoid redundant writes)
+  // Step 2: Filter out unchanged records (MANDATORY - avoid redundant writes)
   const changedRecords = uniqueRecords.filter(hasRecordChanged);
   
+  const skippedCount = uniqueRecords.length - changedRecords.length;
+  
   if (changedRecords.length === 0) {
-    console.log(`⏭️ No changed records to upsert (${uniqueRecords.length} duplicates filtered)`);
+    if (skippedCount > 0) {
+      console.log(`⏭️ All ${skippedCount} records unchanged, no writes needed`);
+    }
     return;
   }
   
-  console.log(`📊 Processing ${changedRecords.length} changed records (${uniqueRecords.length - changedRecords.length} unchanged filtered)`);
-
-  // Step 3: Split into batches
-  const batches = [];
-  for (let i = 0; i < changedRecords.length; i += BATCH_SIZE) {
-    batches.push(changedRecords.slice(i, i + BATCH_SIZE));
-  }
+  console.log(`📊 ${changedRecords.length} changed records (${skippedCount} unchanged skipped)`);
   
-  console.log(`📦 Split into ${batches.length} batches of max ${BATCH_SIZE} records each`);
-
-  // Step 4: Process batches sequentially with delays
-  let successCount = 0;
-  let failCount = 0;
+  // Step 3: Enqueue to global write queue (serialized processing)
+  enqueueWrite(changedRecords);
   
-  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-    const batch = batches[batchIndex];
-    const batchStart = Date.now();
-    let success = false;
-    
-    // Retry logic with backoff
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const { error } = await supabase.from("live_odds").upsert(batch, {
-          onConflict: "event_id,bookmaker_id,market_type,selection",
-          ignoreDuplicates: false,
-        });
-
-        if (error) {
-          throw error;
-        }
-        
-        success = true;
-        successCount += batch.length;
-        
-        const batchDuration = Date.now() - batchStart;
-        console.log(`✅ Batch ${batchIndex + 1}/${batches.length}: ${batch.length} records in ${batchDuration}ms`);
-        break;
-        
-      } catch (error) {
-        const errorMsg = error?.message || String(error);
-        const isRetryable = errorMsg.includes('fetch failed') || 
-                           errorMsg.includes('socket') || 
-                           errorMsg.includes('ECONNRESET') ||
-                           errorMsg.includes('timeout');
-        
-        if (attempt < MAX_RETRIES && isRetryable) {
-          const delay = RETRY_DELAYS[attempt] || 500;
-          console.log(`⚠️ Batch ${batchIndex + 1} attempt ${attempt + 1} failed, retrying in ${delay}ms: ${errorMsg}`);
-          await sleep(delay);
-        } else {
-          console.error(`❌ Batch ${batchIndex + 1} failed after ${attempt + 1} attempts: ${errorMsg}`);
-          failCount += batch.length;
-          break;
-        }
-      }
-    }
-    
-    // Delay between batches to prevent socket saturation
-    if (batchIndex < batches.length - 1) {
-      await sleep(BATCH_DELAY_MS);
-    }
-  }
-  
-  const totalDuration = Date.now() - startTime;
-  console.log(`🏁 Save complete: ${successCount} saved, ${failCount} failed in ${totalDuration}ms`);
+  const duration = Date.now() - startTime;
+  console.log(`📥 Enqueue complete in ${duration}ms`);
   
   // Log match_key stats for cross-bookmaker matching verification
   logMatchKeyStats(changedRecords);
@@ -1485,16 +1553,25 @@ createServer((req, res) => {
   console.log(`Health check server running on port ${PORT}`);
 });
 
+// Log write queue stats periodically
+setInterval(() => {
+  if (writeQueue.length > 0 || isProcessingQueue) {
+    console.log(`📊 Write queue: ${writeQueue.length} pending, processing: ${isProcessingQueue}`);
+  }
+}, 30000);
+
 // Start connection
 console.log("Starting OddsMarket Worker...");
 console.log("API Key:", ODDSMARKET_API_KEY ? "Configured" : "MISSING");
 console.log("Supabase URL:", SUPABASE_URL ? "Configured" : "MISSING");
 console.log("Bookmakers:", BOOKMAKER_IDS.map(getBookmakerName).join(", "));
+console.log("Write config: batch=" + BATCH_SIZE + ", delay=" + WRITE_DELAY_MS + "ms, retries=" + MAX_RETRIES);
 connect();
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("Received SIGTERM, closing connection...");
+  console.log(`Write queue has ${writeQueue.length} pending records`);
   if (ws) ws.close();
   process.exit(0);
 });
