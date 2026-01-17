@@ -47,9 +47,25 @@ function isStatisticalMarket(marketType) {
 }
 
 // 1xbet betId mapping - STATISTICAL MARKETS (Total + Team-specific)
-// Note: betId codes are estimated - will need discovery from live data
+// H2H markets use betValue to determine selection (1=Home, 2=Away, 0=Draw)
 const ONEXBET_MARKETS = {
-  // ===== CORNERS - Calci d'angolo =====
+  // ===== H2H STATISTICAL MARKETS (1X2 - Chi vince il confronto) =====
+  // Shots (Tiri totali) - H2H
+  165: { market: 'Shots', selection: 'H2H', isH2H: true },
+  
+  // Shots On Target (Tiri in porta) - H2H
+  167: { market: 'Shots On Target', selection: 'H2H', isH2H: true },
+  
+  // Fouls (Falli) - H2H
+  170: { market: 'Fouls', selection: 'H2H', isH2H: true },
+  
+  // Offsides (Fuorigiochi) - H2H
+  172: { market: 'Offsides', selection: 'H2H', isH2H: true },
+  
+  // Corners (Calci d'angolo) - H2H - need to discover betId
+  // TBD: { market: 'Corners', selection: 'H2H', isH2H: true },
+  
+  // ===== CORNERS - Over/Under =====
   // Total
   739: { market: 'Corners', selection: 'Over 7.5' },
   740: { market: 'Corners', selection: 'Under 7.5' },
@@ -178,35 +194,30 @@ function map1xbetBetId(betId) {
   return { market: `Bet${betId}`, selection: 'Unknown' };
 }
 
-// Sisal codiceScommessa mapping - STATISTICAL MARKETS (Total + Team-specific)
-// Note: Team-specific codes need discovery from live data
+// Sisal codiceScommessa mapping - H2H STATISTICAL MARKETS
+// These are Head-to-Head markets (1=Home wins, X=Draw, 2=Away wins)
+// Codes discovered from live OddsMarket feed
 const SISAL_MARKETS = {
-  // ===== CORNERS - Calci d'angolo =====
-  9942: 'Corners',               // Totale
-  9943: 'Corners Home',          // Squadra casa
-  9944: 'Corners Away',          // Squadra trasferta
+  // ===== H2H STATISTICAL MARKETS (discovered from live data) =====
+  127: 'Corners',               // Chi vince corner (H2H)
+  // More codes will be discovered from live feed logging
   
-  // ===== SHOTS ON TARGET - Tiri in porta =====
-  28319: 'Shots On Target',      // Totale
-  28323: 'Shots On Target Home', // Squadra casa
-  28324: 'Shots On Target Away', // Squadra trasferta
-  
-  // ===== SHOTS - Tiri totali =====
-  28320: 'Shots',                // Totale
-  28325: 'Shots Home',           // Squadra casa
-  28326: 'Shots Away',           // Squadra trasferta
-  
-  // ===== FOULS - Falli =====
-  28321: 'Fouls',                // Totale
-  28327: 'Fouls Home',           // Squadra casa
-  28328: 'Fouls Away',           // Squadra trasferta
-  
-  // ===== OFFSIDES - Fuorigiochi =====
-  28322: 'Offsides',             // Totale
-  28329: 'Offsides Home',        // Squadra casa
-  28330: 'Offsides Away',        // Squadra trasferta
-  
-  // Note: Actual codes will be discovered from live feed
+  // Legacy Over/Under codes (may not be available via OddsMarket)
+  9942: 'Corners',
+  9943: 'Corners Home',
+  9944: 'Corners Away',
+  28319: 'Shots On Target',
+  28323: 'Shots On Target Home',
+  28324: 'Shots On Target Away',
+  28320: 'Shots',
+  28325: 'Shots Home',
+  28326: 'Shots Away',
+  28321: 'Fouls',
+  28327: 'Fouls Home',
+  28328: 'Fouls Away',
+  28322: 'Offsides',
+  28329: 'Offsides Home',
+  28330: 'Offsides Away',
 };
 
 function mapSisalMarket(codice) {
@@ -524,24 +535,80 @@ async function processOutcomes(data) {
         
         // --- BOOKMAKER-SPECIFIC PARSING ---
         if (bookmakerId === 21) {
-          // 1xbet: uses betId for market/selection
+          // 1xbet: uses betId for market type + betValue for dynamic line
           const betMatch = infoString.match(/betId=(\d+)/);
+          const betValueMatch = infoString.match(/betValue=([0-9]+\.?[0-9]*)/);
+          
           if (betMatch) {
             const betId = parseInt(betMatch[1]);
             const mapped = map1xbetBetId(betId);
             marketType = mapped.market;
-            selection = mapped.selection;
+            
+            // Log unmapped 1xbet betIds to discover H2H markets
+            if (!global.onexbetLog) global.onexbetLog = new Set();
+            if (!global.onexbetLog.has(betId) && mapped.market.startsWith('Bet') && global.onexbetLog.size < 50) {
+              console.log(`📊 1xbet unmapped: betId=${betId}, betValue=${betValueMatch ? betValueMatch[1] : 'none'}, event=${eventName || 'unknown'}`);
+              global.onexbetLog.add(betId);
+            }
+            
+            // Handle H2H markets - betValue indicates selection (1=Home, 2=Away, 0=Draw)
+            if (mapped.isH2H && betValueMatch) {
+              const betValue = parseFloat(betValueMatch[1]);
+              if (betValue === 1) {
+                selection = '1'; // Home wins
+              } else if (betValue === 2) {
+                selection = '2'; // Away wins
+              } else if (betValue === 0) {
+                selection = 'X'; // Draw
+              } else {
+                selection = String(betValue); // Fallback
+              }
+            }
+            // Handle Over/Under markets - betValue is the line
+            else if (betValueMatch && betValueMatch[1] && parseFloat(betValueMatch[1]) > 0) {
+              const betValue = parseFloat(betValueMatch[1]);
+              if (mapped.selection === 'Over' || mapped.selection === 'Under') {
+                selection = `${mapped.selection} ${betValue}`;
+              } else {
+                selection = mapped.selection;
+              }
+            } else {
+              selection = mapped.selection;
+            }
           }
         } else if (bookmakerId === 103) {
           // Sisal: uses codiceScommessa + codiceEsito
           const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
           const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
+          
+          // Try to extract line/handicap value from infoString - look for common patterns
+          // Sisal may use: punti, quota, linea, handicap, spread, over, under followed by number
+          const lineMatch = infoString.match(/(?:punti|quota|linea|handicap|spread|over|under|valore|riferimento)=?[\s:]*([0-9]+\.?[0-9]*)/i);
+          
           if (marketMatch) {
             const codice = parseInt(marketMatch[1]);
             marketType = mapSisalMarket(codice);
+            
+            // Log ALL unique Sisal market + selection combinations to discover available markets
+            if (!global.sisalMarketLog) global.sisalMarketLog = new Set();
+            const esitoCode = esitoMatch ? esitoMatch[1] : 'none';
+            const logKey = `${codice}:${esitoCode}`;
+            if (!global.sisalMarketLog.has(logKey) && global.sisalMarketLog.size < 100) {
+              console.log(`📊 Sisal market: codiceScommessa=${codice}, codiceEsito=${esitoCode}, eventName=${eventName || 'unknown'}`);
+              global.sisalMarketLog.add(logKey);
+            }
           }
           if (esitoMatch) {
-            selection = mapSisalSelection(esitoMatch[1]);
+            let baseSel = mapSisalSelection(esitoMatch[1]);
+            
+            // If we found a line and selection is Over/Under, append the line
+            if (lineMatch && (baseSel === 'Over' || baseSel === 'Under')) {
+              const lineValue = parseFloat(lineMatch[1]);
+              const normalizedLine = lineValue > 50 ? lineValue / 10 : lineValue;
+              selection = `${baseSel} ${normalizedLine}`;
+            } else {
+              selection = baseSel;
+            }
           }
         }
       }
@@ -707,16 +774,39 @@ async function processPendingOutcomes() {
       
       if (bookmakerId === 21) {
         const betMatch = infoString.match(/betId=(\d+)/);
+        const betValueMatch = infoString.match(/betValue=([0-9]+\\.?[0-9]*)/);
         if (betMatch) {
           const mapped = map1xbetBetId(parseInt(betMatch[1]));
           marketType = mapped.market;
-          selection = mapped.selection;
+          // Use betValue as dynamic line if available
+          if (betValueMatch && betValueMatch[1] && parseFloat(betValueMatch[1]) > 0) {
+            const betValue = parseFloat(betValueMatch[1]);
+            if (mapped.selection === 'Over' || mapped.selection === 'Under') {
+              selection = `${mapped.selection} ${betValue}`;
+            } else {
+              selection = mapped.selection;
+            }
+          } else {
+            selection = mapped.selection;
+          }
         }
       } else if (bookmakerId === 103) {
+        // Sisal: uses codiceScommessa + codiceEsito
         const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
         const esitoMatch = infoString.match(/codiceEsito=(\d+)/);
+        const lineMatch = infoString.match(/(?:handicap|line|spread|punti|quota_riferimento|valore)=([0-9]+\.?[0-9]*)/i);
+        
         if (marketMatch) marketType = mapSisalMarket(parseInt(marketMatch[1]));
-        if (esitoMatch) selection = mapSisalSelection(esitoMatch[1]);
+        if (esitoMatch) {
+          let baseSel = mapSisalSelection(esitoMatch[1]);
+          if (lineMatch && (baseSel === 'Over' || baseSel === 'Under')) {
+            const lineValue = parseFloat(lineMatch[1]);
+            const normalizedLine = lineValue > 50 ? lineValue / 10 : lineValue;
+            selection = `${baseSel} ${normalizedLine}`;
+          } else {
+            selection = baseSel;
+          }
+        }
       }
     }
     
