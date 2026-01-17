@@ -544,11 +544,31 @@ async function processOutcomes(data) {
             const mapped = map1xbetBetId(betId);
             marketType = mapped.market;
             
-            // Log unmapped 1xbet betIds to discover H2H markets
-            if (!global.onexbetLog) global.onexbetLog = new Set();
-            if (!global.onexbetLog.has(betId) && mapped.market.startsWith('Bet') && global.onexbetLog.size < 50) {
-              console.log(`📊 1xbet unmapped: betId=${betId}, betValue=${betValueMatch ? betValueMatch[1] : 'none'}, event=${eventName || 'unknown'}`);
-              global.onexbetLog.add(betId);
+            // Log ALL 1xbet betIds to discover H2H markets
+            if (!global.onexbetLog) global.onexbetLog = new Map();
+            if (!global.onexbetLog.has(betId)) {
+              const betValueStr = betValueMatch ? betValueMatch[1] : 'none';
+              const isKnown = !mapped.market.startsWith('Bet');
+              console.log(`🔍 1XBET betId=${betId} betValue=${betValueStr} mapped=${mapped.market}|${mapped.selection} known=${isKnown} event="${eventName || 'unknown'}"`);
+              global.onexbetLog.set(betId, { betValue: betValueStr, market: mapped.market, count: 1 });
+            } else {
+              // Increment count for known betIds
+              const entry = global.onexbetLog.get(betId);
+              entry.count++;
+              global.onexbetLog.set(betId, entry);
+            }
+            
+            // Log periodic summary of discovered betIds (every 100 outcomes)
+            if (!global.onexbetLogCounter) global.onexbetLogCounter = 0;
+            global.onexbetLogCounter++;
+            if (global.onexbetLogCounter % 500 === 0) {
+              const unmapped = [...global.onexbetLog.entries()].filter(([id, data]) => data.market.startsWith('Bet'));
+              if (unmapped.length > 0) {
+                console.log(`📊 1XBET UNMAPPED SUMMARY (${unmapped.length} betIds):`);
+                unmapped.slice(0, 20).forEach(([id, data]) => {
+                  console.log(`   betId=${id} betValue=${data.betValue} count=${data.count}`);
+                });
+              }
             }
             
             // Handle H2H markets - betValue indicates selection (1=Home, 2=Away, 0=Draw)
