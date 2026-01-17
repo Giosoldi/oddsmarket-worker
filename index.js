@@ -44,6 +44,37 @@ function isStatisticalMarket(marketType) {
   return STATISTICAL_MARKETS.some((stat) => marketType.toLowerCase().includes(stat.toLowerCase()));
 }
 
+// ============ 1XBET STATISTICAL BETID CLASSIFICATION ============
+// These betIds indicate statistical markets even when not mapped to named markets
+// Based on analysis of OddsMarket feed structure and Railway logs
+const ONEXBET_STAT_GROUPS = {
+  // H2H: Chi vince il confronto (1=Home, 2=Away, 0/3=Draw)
+  // Includes main 1X2 markets and statistical H2H variants
+  H2H: [
+    1, 2, 3, 4, 5, 6, 7, 8,         // Main match markets (1X2, DC, etc.)
+    11, 12, 13, 14,                  // Statistical H2H: Corners, Shots, Shots OT, Fouls
+    17, 19, 20, 22,                  // Additional statistical H2H variants
+    181, 182, 183,                   // Extended statistical markets
+    424, 426,                        // Yellow Cards H2H variants
+    506,                             // Additional market
+    751, 755, 3829,                  // Offsides and other H2H
+  ],
+  // OVER_UNDER: Mercati con linea dinamica (betValue contiene la linea)
+  OVER_UNDER: [9, 10, 18, 3827, 3828, 3830],
+};
+
+// Check if a 1xbet betId is a statistical market
+function is1xbetStatisticalBetId(betId) {
+  return ONEXBET_STAT_GROUPS.H2H.includes(betId) || ONEXBET_STAT_GROUPS.OVER_UNDER.includes(betId);
+}
+
+// Get the statistical group for a 1xbet betId
+function get1xbetStatGroup(betId) {
+  if (ONEXBET_STAT_GROUPS.H2H.includes(betId)) return 'H2H_STATS';
+  if (ONEXBET_STAT_GROUPS.OVER_UNDER.includes(betId)) return 'STATS_OU';
+  return null;
+}
+
 // 1xbet betId mapping - STATISTICAL MARKETS (Total + Team-specific)
 // H2H markets use betValue to determine selection (1=Home, 2=Away, 3=Draw)
 const ONEXBET_MARKETS = {
@@ -252,6 +283,125 @@ function mapSisalSelection(codiceEsito) {
     return mapped;
   }
   return `E${codiceEsito}`;
+}
+
+// ============ MATCH KEY GENERATION ============
+// Cross-bookmaker event matching using normalized team names + kickoff time
+// Event IDs from OddsMarket are NOT shared between bookmakers!
+
+// Cyrillic to Latin transliteration map
+const CYRILLIC_MAP = {
+  'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
+  'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
+  'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
+  'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '',
+  'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya'
+};
+
+function transliterateCyrillic(text) {
+  return text.toLowerCase().split('').map(char => CYRILLIC_MAP[char] || char).join('');
+}
+
+// Team name normalization map for known variations
+const TEAM_NAME_MAP = {
+  // Italian teams (Russian -> Latin)
+  'наполи': 'napoli', 'ювентус': 'juventus', 'интер': 'inter',
+  'милан': 'milan', 'рома': 'roma', 'лацио': 'lazio',
+  'аталанта': 'atalanta', 'фиорентина': 'fiorentina', 'торино': 'torino',
+  'болонья': 'bologna', 'удинезе': 'udinese', 'сассуоло': 'sassuolo',
+  'эмполи': 'empoli', 'салернитана': 'salernitana', 'лечче': 'lecce',
+  'монца': 'monza', 'фрозиноне': 'frosinone', 'кальяри': 'cagliari',
+  'дженоа': 'genoa', 'верона': 'verona', 'сампдория': 'sampdoria',
+  
+  // Spanish teams
+  'барселона': 'barcelona', 'реал мадрид': 'real madrid', 'атлетико': 'atletico',
+  'севилья': 'sevilla', 'валенсия': 'valencia', 'сельта': 'celta',
+  'райо вальекано': 'rayo vallecano', 'бетис': 'betis', 'вильярреал': 'villarreal',
+  'реал сосьедад': 'real sociedad', 'атлетик бильбао': 'athletic bilbao',
+  'жирона': 'girona', 'осасуна': 'osasuna', 'алавес': 'alaves',
+  
+  // English teams
+  'манчестер юнайтед': 'manchester united', 'манчестер сити': 'manchester city',
+  'ливерпуль': 'liverpool', 'челси': 'chelsea', 'арсенал': 'arsenal',
+  'тоттенхэм': 'tottenham', 'ньюкасл': 'newcastle', 'вест хэм': 'west ham',
+  
+  // German teams
+  'бавария': 'bayern', 'боруссия дортмунд': 'borussia dortmund',
+  'лейпциг': 'leipzig', 'байер': 'leverkusen',
+};
+
+function normalizeTeamName(name) {
+  if (!name) return '';
+  
+  let normalized = name.toLowerCase().trim();
+  
+  // Check for known team name mappings first
+  for (const [russian, latin] of Object.entries(TEAM_NAME_MAP)) {
+    if (normalized.includes(russian)) {
+      normalized = normalized.replace(russian, latin);
+    }
+  }
+  
+  // Transliterate any remaining Cyrillic
+  normalized = transliterateCyrillic(normalized);
+  
+  // Remove common suffixes and prefixes
+  normalized = normalized
+    .replace(/\b(fc|ac|ssc|as|ss|afc|sc|cf|cd|ud|rc|rcd|real|sporting|atletico|athletic)\b/gi, '')
+    .replace(/[^a-z0-9]/g, '') // Remove non-alphanumeric
+    .trim();
+  
+  return normalized;
+}
+
+function parseEventName(eventName) {
+  if (!eventName) return null;
+  
+  // Common separators: " - ", " – ", " vs ", " v "
+  const separators = [' - ', ' – ', ' — ', ' vs ', ' v '];
+  
+  for (const sep of separators) {
+    if (eventName.includes(sep)) {
+      const parts = eventName.split(sep);
+      if (parts.length >= 2) {
+        return {
+          home: parts[0].trim(),
+          away: parts[parts.length - 1].trim()
+        };
+      }
+    }
+  }
+  
+  return null;
+}
+
+function roundKickoffTime(timestamp) {
+  if (!timestamp) return 'unknown';
+  
+  const date = new Date(timestamp);
+  if (isNaN(date.getTime())) return 'unknown';
+  
+  // Round to nearest 5 minutes
+  const minutes = date.getMinutes();
+  const roundedMinutes = Math.round(minutes / 5) * 5;
+  date.setMinutes(roundedMinutes);
+  date.setSeconds(0);
+  date.setMilliseconds(0);
+  
+  return date.toISOString();
+}
+
+function buildMatchKey(eventName, startsAt) {
+  const parsed = parseEventName(eventName);
+  if (!parsed) return null;
+  
+  const home = normalizeTeamName(parsed.home);
+  const away = normalizeTeamName(parsed.away);
+  const kickoff = roundKickoffTime(startsAt);
+  
+  if (!home || !away) return null;
+  
+  return `${home}_${away}_${kickoff}`;
 }
 
 // Initialize Supabase client
@@ -611,17 +761,33 @@ async function processOutcomes(data) {
           if (betMatch) {
             const betId = parseInt(betMatch[1]);
             const mapped = map1xbetBetId(betId);
-            marketType = mapped.market;
+            const statGroup = get1xbetStatGroup(betId);
+            
+            // CRITICAL: For 1xbet, use betId-based classification instead of market name
+            // If betId is in ONEXBET_STAT_GROUPS, it's a statistical market
+            if (!statGroup && mapped.market.startsWith("Bet")) {
+              // Not a statistical betId and not mapped - skip
+              continue;
+            }
+            
+            // Use mapped market if available, otherwise use raw betId marker
+            if (mapped.market.startsWith("Bet")) {
+              // Not mapped but is statistical - save with betId identifier
+              marketType = `1xbet_stat_${betId}`;
+            } else {
+              marketType = mapped.market;
+            }
 
             // Log ALL 1xbet betIds to discover H2H markets
             if (!global.onexbetLog) global.onexbetLog = new Map();
             if (!global.onexbetLog.has(betId)) {
               const betValueStr = betValueMatch ? betValueMatch[1] : "none";
               const isKnown = !mapped.market.startsWith("Bet");
+              const isStatBetId = !!statGroup;
               console.log(
-                `🔍 1XBET betId=${betId} betValue=${betValueStr} mapped=${mapped.market}|${mapped.selection} known=${isKnown} event="${eventName || "unknown"}"`,
+                `🔍 1XBET betId=${betId} betValue=${betValueStr} mapped=${mapped.market}|${mapped.selection} known=${isKnown} statGroup=${statGroup || "none"} event="${eventName || "unknown"}"`,
               );
-              global.onexbetLog.set(betId, { betValue: betValueStr, market: mapped.market, count: 1 });
+              global.onexbetLog.set(betId, { betValue: betValueStr, market: mapped.market, statGroup, count: 1 });
             } else {
               // Increment count for known betIds
               const entry = global.onexbetLog.get(betId);
@@ -629,34 +795,60 @@ async function processOutcomes(data) {
               global.onexbetLog.set(betId, entry);
             }
 
-            // Log periodic summary of discovered betIds (every 100 outcomes)
+            // Log periodic summary of discovered betIds (every 500 outcomes)
             if (!global.onexbetLogCounter) global.onexbetLogCounter = 0;
             global.onexbetLogCounter++;
             if (global.onexbetLogCounter % 500 === 0) {
-              const unmapped = [...global.onexbetLog.entries()].filter(([id, data]) => data.market.startsWith("Bet"));
-              if (unmapped.length > 0) {
-                console.log(`📊 1XBET UNMAPPED SUMMARY (${unmapped.length} betIds):`);
-                unmapped.slice(0, 20).forEach(([id, data]) => {
-                  console.log(`   betId=${id} betValue=${data.betValue} count=${data.count}`);
-                });
-              }
+              const unmapped = [...global.onexbetLog.entries()].filter(([id, data]) => data.market.startsWith("Bet") || data.market.startsWith("1xbet_stat"));
+              const saved = [...global.onexbetLog.entries()].filter(([id, data]) => data.statGroup);
+              console.log(`📊 1XBET STATS: ${saved.length} statistical betIds saved, ${unmapped.length} raw betIds:`);
+              unmapped.slice(0, 10).forEach(([id, data]) => {
+                console.log(`   betId=${id} betValue=${data.betValue} statGroup=${data.statGroup || "none"} count=${data.count}`);
+              });
             }
 
-            // Handle H2H markets - betValue indicates selection (1=Home, 2=Away, 3=Draw)
-            if (mapped.isH2H && betValueMatch) {
+            // Construct selection based on statistical group
+            if (statGroup === 'H2H_STATS') {
+              // H2H markets - betValue indicates selection (1=Home, 2=Away, 0/3=Draw)
+              if (betValueMatch) {
+                const betValue = parseFloat(betValueMatch[1]);
+                if (betValue === 1) {
+                  selection = "1"; // Home wins
+                } else if (betValue === 2) {
+                  selection = "2"; // Away wins
+                } else if (betValue === 0 || betValue === 3) {
+                  selection = "X"; // Draw (both 0 and 3 map to X for Sisal compatibility)
+                } else {
+                  selection = String(betValue); // Fallback
+                }
+              } else if (mapped.isH2H) {
+                // Use mapped H2H logic as fallback
+                selection = mapped.selection;
+              } else {
+                selection = "UNK";
+              }
+            } else if (statGroup === 'STATS_OU') {
+              // Over/Under markets - betValue is the line
+              if (betValueMatch && parseFloat(betValueMatch[1]) > 0) {
+                const betValue = parseFloat(betValueMatch[1]);
+                selection = `line ${betValue}`;
+              } else {
+                selection = "UNK";
+              }
+            } else if (mapped.isH2H && betValueMatch) {
+              // Mapped H2H (like Corners H2H)
               const betValue = parseFloat(betValueMatch[1]);
               if (betValue === 1) {
-                selection = "1"; // Home wins
+                selection = "1";
               } else if (betValue === 2) {
-                selection = "2"; // Away wins
+                selection = "2";
               } else if (betValue === 0 || betValue === 3) {
-                selection = "X"; // Draw (both 0 and 3 map to X for Sisal compatibility)
+                selection = "X";
               } else {
-                selection = String(betValue); // Fallback
+                selection = String(betValue);
               }
-            }
-            // Handle Over/Under markets - betValue is the line
-            else if (betValueMatch && betValueMatch[1] && parseFloat(betValueMatch[1]) > 0) {
+            } else if (betValueMatch && parseFloat(betValueMatch[1]) > 0) {
+              // Mapped Over/Under
               const betValue = parseFloat(betValueMatch[1]);
               if (mapped.selection === "Over" || mapped.selection === "Under") {
                 selection = `${mapped.selection} ${betValue}`;
@@ -666,6 +858,9 @@ async function processOutcomes(data) {
             } else {
               selection = mapped.selection;
             }
+          } else {
+            // No betId found - skip for 1xbet
+            continue;
           }
         } else if (bookmakerId === 103) {
           // Sisal: uses codiceScommessa + codiceEsito
@@ -705,6 +900,11 @@ async function processOutcomes(data) {
               selection = baseSel;
             }
           }
+          
+          // For Sisal, still use isStatisticalMarket filter
+          if (!isStatisticalMarket(marketType)) {
+            continue;
+          }
         }
       }
 
@@ -716,14 +916,12 @@ async function processOutcomes(data) {
       // Only process valid bookmakers
       const validBookmakers = [21, 103];
 
-      // CRITICAL: Only save STATISTICAL MARKETS
-      if (!isStatisticalMarket(marketType)) {
-        continue;
-      }
-
       if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === "number" && odds > 1 && odds < 1000) {
         // Use eventName from cache if available, otherwise use Event ID as fallback
         const finalEventName = eventName || `Event ${eventIdForStorage}`;
+        
+        // Generate match_key for cross-bookmaker matching
+        const matchKey = buildMatchKey(finalEventName, eventInfo.startsAt);
 
         oddsRecords.push({
           event_id: eventIdForStorage,
@@ -737,6 +935,7 @@ async function processOutcomes(data) {
           selection: selection,
           odds: parseFloat(odds),
           updated_at: new Date().toISOString(),
+          match_key: matchKey, // NEW: Cross-bookmaker matching key
         });
       }
     }
