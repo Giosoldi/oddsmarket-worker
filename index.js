@@ -330,26 +330,66 @@ const TEAM_NAME_MAP = {
   'лейпциг': 'leipzig', 'байер': 'leverkusen',
 };
 
+// ============ TEAM NAME SEMANTIC NORMALIZATION ============
+// Semantic alias map for common transliteration errors (Russian -> English)
+const TEAM_ALIAS = {
+  yorksiti: 'yorkcity',
+  yorkciti: 'yorkcity',
+  manchesteryunaited: 'manchesterunited',
+  manchesteryunayted: 'manchesterunited',
+  manchestersiti: 'manchestercity',
+  bristolsiti: 'bristolcity',
+  norwichsiti: 'norwichcity',
+  leicestersiti: 'leicestercity',
+  stouksiti: 'stokecity',
+  hullsiti: 'hullcity',
+  swansisiti: 'swanseacity',
+  kardiffsiti: 'cardiffcity',
+  birminghamsiti: 'birminghamcity',
+  sautendyunaited: 'southendunited',
+  sautendyunayted: 'southendunited',
+  sheffildyunaited: 'sheffieldunited',
+  sheffildyunayted: 'sheffieldunited',
+  nyukaslyunaited: 'newcastleunited',
+  nyukaslyunayted: 'newcastleunited',
+  liidsyunaited: 'leedsunited',
+  liidsyunayted: 'leedsunited',
+  vestkhemyunaited: 'westhamunited',
+  vestkhemyunayted: 'westhamunited',
+};
+
 function normalizeTeamName(name) {
   if (!name) return '';
   
   let normalized = name.toLowerCase().trim();
   
-  // Check for known team name mappings first
+  // Step 1: Check for known team name mappings first
   for (const [russian, latin] of Object.entries(TEAM_NAME_MAP)) {
     if (normalized.includes(russian)) {
       normalized = normalized.replace(russian, latin);
     }
   }
   
-  // Transliterate any remaining Cyrillic
+  // Step 2: Transliterate any remaining Cyrillic
   normalized = transliterateCyrillic(normalized);
   
-  // Remove common suffixes and prefixes
+  // Step 3: Basic cleanup
   normalized = normalized
     .replace(/\b(fc|ac|ssc|as|ss|afc|sc|cf|cd|ud|rc|rcd|real|sporting|atletico|athletic)\b/gi, '')
-    .replace(/[^a-z0-9]/g, '') // Remove non-alphanumeric
+    .replace(/[^a-z0-9]/g, '')
     .trim();
+  
+  // Step 4: Semantic suffix normalization
+  normalized = normalized
+    .replace(/siti$/, 'city')
+    .replace(/citi$/, 'city')
+    .replace(/yunaited$/, 'united')
+    .replace(/yunayted$/, 'united');
+  
+  // Step 5: Check alias map for exact matches
+  if (TEAM_ALIAS[normalized]) {
+    normalized = TEAM_ALIAS[normalized];
+  }
   
   return normalized;
 }
@@ -375,13 +415,20 @@ function parseEventName(eventName) {
   return null;
 }
 
-function roundKickoffTime(timestamp) {
+// ============ TIMESTAMP HANDLING ============
+// OddsMarket timestamps are NOT reliable kickoff times
+// raw_start_time: stored as-is for matching (internal use only)
+// kickoff_time: left null (not auto-derived to avoid wrong dates)
+
+function roundRawStartTime(timestamp) {
+  // This function rounds the raw OddsMarket timestamp for MATCHING purposes only
+  // The result is NOT a real kickoff time and should NOT be displayed to users
   if (!timestamp) return 'unknown';
   
   const date = new Date(timestamp);
   if (isNaN(date.getTime())) return 'unknown';
   
-  // Round to nearest 5 minutes
+  // Round to nearest 5 minutes for matching tolerance
   const minutes = date.getMinutes();
   const roundedMinutes = Math.round(minutes / 5) * 5;
   date.setMinutes(roundedMinutes);
@@ -391,17 +438,31 @@ function roundKickoffTime(timestamp) {
   return date.toISOString();
 }
 
-function buildMatchKey(eventName, startsAt) {
+function buildMatchKey(eventName, rawStartTime) {
+  // match_key is built from normalized team names + rounded raw timestamp
+  // This is for MATCHING only, NOT for display
   const parsed = parseEventName(eventName);
   if (!parsed) return null;
   
   const home = normalizeTeamName(parsed.home);
   const away = normalizeTeamName(parsed.away);
-  const kickoff = roundKickoffTime(startsAt);
+  const roundedTime = roundRawStartTime(rawStartTime);
   
   if (!home || !away) return null;
   
-  return `${home}_${away}_${kickoff}`;
+  return `${home}_${away}_${roundedTime}`;
+}
+
+// Generate display-friendly team name (for UI, not matching)
+function buildDisplayName(eventName) {
+  const parsed = parseEventName(eventName);
+  if (!parsed) return eventName;
+  
+  // Just clean up the original name without aggressive normalization
+  const cleanHome = parsed.home.trim();
+  const cleanAway = parsed.away.trim();
+  
+  return `${cleanHome} - ${cleanAway}`;
 }
 
 // Initialize Supabase client
@@ -922,6 +983,12 @@ async function processOutcomes(data) {
         
         // Generate match_key for cross-bookmaker matching
         const matchKey = buildMatchKey(finalEventName, eventInfo.startsAt);
+        
+        // Generate display name (cleaned, for UI)
+        const displayName = buildDisplayName(finalEventName);
+        
+        // Store raw start time as-is (for matching reference, not real kickoff)
+        const rawStartTime = eventInfo.startsAt || null;
 
         oddsRecords.push({
           event_id: eventIdForStorage,
@@ -935,7 +1002,11 @@ async function processOutcomes(data) {
           selection: selection,
           odds: parseFloat(odds),
           updated_at: new Date().toISOString(),
-          match_key: matchKey, // NEW: Cross-bookmaker matching key
+          match_key: matchKey,
+          // NEW: Separate fields for timestamp handling
+          raw_start_time: rawStartTime, // Original OddsMarket value (for matching only)
+          display_name: displayName,    // Clean name for UI display
+          kickoff_time: null,           // Left null - not auto-derived to avoid wrong dates
         });
       }
     }
@@ -1132,9 +1203,13 @@ async function processPendingOutcomes() {
     if (!isStatisticalMarket(marketType)) continue;
 
     if (bookmakerId && validBookmakers.includes(bookmakerId) && typeof odds === "number" && odds > 1 && odds < 1000) {
+      const finalEventName = eventInfo.name || `Event ${eventIdForStorage}`;
+      const matchKey = buildMatchKey(finalEventName, eventInfo.startsAt);
+      const displayName = buildDisplayName(finalEventName);
+      
       oddsRecords.push({
         event_id: eventIdForStorage,
-        event_name: eventInfo.name || `Event ${eventIdForStorage}`,
+        event_name: finalEventName,
         event_time: eventInfo.startsAt || null,
         league: eventInfo.league || "Soccer",
         sport_id: SPORT_ID,
@@ -1144,6 +1219,10 @@ async function processPendingOutcomes() {
         selection: selection,
         odds: parseFloat(odds),
         updated_at: new Date().toISOString(),
+        match_key: matchKey,
+        raw_start_time: eventInfo.startsAt || null,
+        display_name: displayName,
+        kickoff_time: null,
       });
     }
   }
