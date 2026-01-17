@@ -649,6 +649,9 @@ function logLeagueStats() {
 async function processOutcomes(data) {
   if (!data) return;
 
+  // BACKPRESSURE: Wait if queue is too full before processing more data
+  await waitForBackpressure();
+
   console.log("Processing outcomes, count:", Array.isArray(data) ? data.length : 1);
 
   const outcomes = Array.isArray(data) ? data : [data];
@@ -936,19 +939,36 @@ async function processOutcomes(data) {
 
           if (marketMatch) {
             const codice = parseInt(marketMatch[1]);
-            marketType = mapSisalMarket(codice);
-
+            const mappedMarket = mapSisalMarket(codice);
+            
             // Log ALL unique Sisal market + selection combinations to discover available markets
-            if (!global.sisalMarketLog) global.sisalMarketLog = new Set();
+            if (!global.sisalMarketLog) global.sisalMarketLog = new Map();
             const esitoCode = esitoMatch ? esitoMatch[1] : "none";
             const logKey = `${codice}:${esitoCode}`;
-            if (!global.sisalMarketLog.has(logKey) && global.sisalMarketLog.size < 100) {
+            
+            if (!global.sisalMarketLog.has(logKey)) {
+              global.sisalMarketLog.set(logKey, { count: 1, sample: eventName || "unknown" });
               console.log(
-                `📊 Sisal market: codiceScommessa=${codice}, codiceEsito=${esitoCode}, eventName=${eventName || "unknown"}`,
+                `📊 SISAL NEW: codiceScommessa=${codice} codiceEsito=${esitoCode} mapped="${mappedMarket}" event="${eventName || "unknown"}"`,
               );
-              global.sisalMarketLog.add(logKey);
+            } else {
+              const entry = global.sisalMarketLog.get(logKey);
+              entry.count++;
             }
+            
+            // CRITICAL FIX: Save unmapped Sisal markets too (like 1xbet)
+            // This allows discovery of new market codes
+            if (mappedMarket.startsWith('M')) {
+              // Not mapped - save with codice identifier for later mapping
+              marketType = `sisal_stat_${codice}`;
+            } else {
+              marketType = mappedMarket;
+            }
+          } else {
+            // No codiceScommessa found - skip
+            continue;
           }
+          
           if (esitoMatch) {
             let baseSel = mapSisalSelection(esitoMatch[1]);
 
@@ -962,10 +982,8 @@ async function processOutcomes(data) {
             }
           }
           
-          // For Sisal, still use isStatisticalMarket filter
-          if (!isStatisticalMarket(marketType)) {
-            continue;
-          }
+          // REMOVED: isStatisticalMarket filter for Sisal
+          // Now we save ALL Sisal markets with codiceScommessa to discover new codes
         }
       }
 
@@ -1023,6 +1041,9 @@ async function processOutcomes(data) {
   }
 }
 
+// Track all unique bookmaker IDs received (for debugging)
+if (!global.receivedBookmakers) global.receivedBookmakers = new Set();
+
 async function processBookmakerEvents(data) {
   if (!data) return;
 
@@ -1031,6 +1052,17 @@ async function processBookmakerEvents(data) {
   const events = Array.isArray(data) ? data : [data];
   let added = 0;
   const bookmakerCounts = {};
+  
+  // DEBUG: Log first event structure to understand format
+  if (events.length > 0 && !global.loggedFirstEvent) {
+    global.loggedFirstEvent = true;
+    const first = events[0];
+    if (Array.isArray(first)) {
+      console.log(`📋 EVENT FORMAT (array): length=${first.length}, sample:`, JSON.stringify(first).substring(0, 300));
+    } else if (typeof first === 'object') {
+      console.log(`📋 EVENT FORMAT (object): keys=${Object.keys(first).join(',')}, sample:`, JSON.stringify(first).substring(0, 300));
+    }
+  }
 
   for (const event of events) {
     if (!event) continue;
@@ -1060,6 +1092,12 @@ async function processBookmakerEvents(data) {
     }
 
     if (eventId && bookmakerId) {
+      // Track all unique bookmaker IDs we receive
+      if (!global.receivedBookmakers.has(bookmakerId)) {
+        global.receivedBookmakers.add(bookmakerId);
+        console.log(`🆕 NEW BOOKMAKER DETECTED: ID=${bookmakerId} (${getBookmakerName(bookmakerId)})`);
+      }
+      
       eventsCache.set(String(eventId), {
         name: eventName,
         startsAt: startsAt,
@@ -1294,33 +1332,66 @@ async function processOddsData(data) {
 
 const writeQueue = [];
 let isProcessingQueue = false;
+let backpressureActive = false;
 
-const BATCH_SIZE = 50; // Increased batch size for faster processing
-const WRITE_DELAY_MS = 200; // Reduced delay (still safe)
+const BATCH_SIZE = 50; // Records per upsert
+const WRITE_DELAY_MS = 200; // Base delay between writes
 const MAX_RETRIES = 2; // Maximum retry attempts per batch
 const RETRY_DELAYS = [300, 600]; // Backoff delays for retries (ms)
-const MAX_QUEUE_SIZE = 5000; // Maximum queue size before dropping old records
+const MAX_QUEUE_SIZE = 5000; // Hard limit - never exceed this
+const BACKPRESSURE_THRESHOLD = 3000; // Pause ingestion above this
 
 // Helper function to sleep
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Add records to the global write queue with backpressure
+// Check if backpressure is active - call this BEFORE creating records
+function isBackpressureActive() {
+  return writeQueue.length >= BACKPRESSURE_THRESHOLD;
+}
+
+// Wait for backpressure to clear - use in ingestion path
+async function waitForBackpressure() {
+  if (writeQueue.length < BACKPRESSURE_THRESHOLD) {
+    if (backpressureActive) {
+      backpressureActive = false;
+      console.log(`✅ BACKPRESSURE RELEASED - queue: ${writeQueue.length}`);
+    }
+    return;
+  }
+  
+  if (!backpressureActive) {
+    backpressureActive = true;
+    console.warn(`🛑 QUEUE BACKPRESSURE ACTIVE – ingestion paused (queue: ${writeQueue.length})`);
+  }
+  
+  // Wait until queue drains
+  while (writeQueue.length >= BACKPRESSURE_THRESHOLD) {
+    await sleep(200);
+  }
+  
+  backpressureActive = false;
+  console.log(`✅ BACKPRESSURE RELEASED – ingestion resumed (queue: ${writeQueue.length})`);
+}
+
+// Add records to the global write queue with hard limit
 function enqueueWrite(records) {
   if (!records || records.length === 0) return;
   
-  // BACKPRESSURE: If queue is too large, drop oldest records
-  if (writeQueue.length > MAX_QUEUE_SIZE) {
-    const toDrop = writeQueue.length - MAX_QUEUE_SIZE + records.length;
-    if (toDrop > 0) {
-      writeQueue.splice(0, toDrop);
-      console.warn(`⚠️ BACKPRESSURE: Dropped ${toDrop} oldest records, queue was overflowing`);
-    }
+  // HARD LIMIT: If queue exceeds max, drop oldest records
+  if (writeQueue.length >= MAX_QUEUE_SIZE) {
+    const toDrop = Math.min(records.length, writeQueue.length - MAX_QUEUE_SIZE + records.length);
+    writeQueue.splice(0, toDrop);
+    console.warn(`⚠️ HARD LIMIT: Dropped ${toDrop} oldest records (queue was at ${writeQueue.length + toDrop})`);
   }
   
   writeQueue.push(...records);
-  console.log(`📥 Enqueued ${records.length} records, queue size: ${writeQueue.length}`);
+  
+  // Log queue status (less verbose)
+  if (writeQueue.length > 1000 || records.length > 20) {
+    console.log(`📥 Enqueued ${records.length} records, queue: ${writeQueue.length}`);
+  }
   
   // Trigger processing if not already running
   if (!isProcessingQueue) {
@@ -1567,8 +1638,24 @@ createServer((req, res) => {
 
 // Log write queue stats periodically
 setInterval(() => {
-  if (writeQueue.length > 0 || isProcessingQueue) {
-    console.log(`📊 Write queue: ${writeQueue.length} pending, processing: ${isProcessingQueue}`);
+  const status = backpressureActive ? '🛑 PAUSED' : '✅ OK';
+  if (writeQueue.length > 0 || isProcessingQueue || backpressureActive) {
+    console.log(`📊 Queue: ${writeQueue.length} pending | processing: ${isProcessingQueue} | backpressure: ${status}`);
+  }
+  
+  // Log bookmaker status every interval
+  const receivedBMs = global.receivedBookmakers ? [...global.receivedBookmakers] : [];
+  const expectedBMs = BOOKMAKER_IDS;
+  const missing = expectedBMs.filter(id => !receivedBMs.includes(id));
+  
+  if (missing.length > 0) {
+    console.warn(`⚠️ MISSING BOOKMAKERS: ${missing.map(id => `${id}(${getBookmakerName(id)})`).join(', ')} - check subscription!`);
+  }
+  
+  // Log Sisal market discovery status
+  if (global.sisalMarketLog && global.sisalMarketLog.size > 0) {
+    const totalSisalRecords = [...global.sisalMarketLog.values()].reduce((sum, v) => sum + v.count, 0);
+    console.log(`📊 SISAL: ${global.sisalMarketLog.size} unique markets discovered, ${totalSisalRecords} total records`);
   }
 }, 30000);
 
@@ -1577,7 +1664,7 @@ console.log("Starting OddsMarket Worker...");
 console.log("API Key:", ODDSMARKET_API_KEY ? "Configured" : "MISSING");
 console.log("Supabase URL:", SUPABASE_URL ? "Configured" : "MISSING");
 console.log("Bookmakers:", BOOKMAKER_IDS.map(getBookmakerName).join(", "));
-console.log("Write config: batch=" + BATCH_SIZE + ", delay=" + WRITE_DELAY_MS + "ms, retries=" + MAX_RETRIES);
+console.log(`Write config: batch=${BATCH_SIZE}, delay=${WRITE_DELAY_MS}ms, maxQueue=${MAX_QUEUE_SIZE}, backpressureAt=${BACKPRESSURE_THRESHOLD}`);
 connect();
 
 // Graceful shutdown
