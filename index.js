@@ -45,26 +45,28 @@ function isStatisticalMarket(marketType) {
 }
 
 // 1xbet betId mapping - STATISTICAL MARKETS (Total + Team-specific)
-// H2H markets use betValue to determine selection (1=Home, 2=Away, 0=Draw)
+// H2H markets use betValue to determine selection (1=Home, 2=Away, 3=Draw)
 const ONEXBET_MARKETS = {
   // ===== H2H STATISTICAL MARKETS (1X2 - Chi vince il confronto) =====
-  // Shots (Tiri totali) - H2H
-  165: { market: "Shots", selection: "H2H", isH2H: true },
-
-  // Shots On Target (Tiri in porta) - H2H
-  167: { market: "Shots On Target", selection: "H2H", isH2H: true },
-
-  // Fouls (Falli) - H2H
-  170: { market: "Fouls", selection: "H2H", isH2H: true },
-
-  // Offsides (Fuorigiochi) - H2H
-  172: { market: "Offsides", selection: "H2H", isH2H: true },
-
-  // Corners (Calci d'angolo) - H2H
-  160: { market: "Corners", selection: "H2H", isH2H: true },
-
-  // Corners (Calci d'angolo) - H2H - need to discover betId
-  // TBD: { market: 'Corners', selection: 'H2H', isH2H: true },
+  // Discovered from Railway logs: betId 11,12,13,14,424 have betValue=1,2,3 (H2H pattern)
+  
+  // betId=11 - H2H market (most frequent, count=12574)
+  11: { market: "Corners", selection: "H2H", isH2H: true },
+  
+  // betId=12 - H2H market (very frequent, count=12574)
+  12: { market: "Shots", selection: "H2H", isH2H: true },
+  
+  // betId=13 - H2H market (count=11748)
+  13: { market: "Shots On Target", selection: "H2H", isH2H: true },
+  
+  // betId=14 - H2H market (count=11763)
+  14: { market: "Fouls", selection: "H2H", isH2H: true },
+  
+  // betId=424 - H2H market (has betValue=3 for Draw)
+  424: { market: "Yellow Cards", selection: "H2H", isH2H: true },
+  
+  // betId=751 - H2H market (count=3213)
+  751: { market: "Offsides", selection: "H2H", isH2H: true },
 
   // ===== CORNERS - Over/Under =====
   // Total
