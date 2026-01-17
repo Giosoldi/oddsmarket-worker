@@ -644,8 +644,10 @@ async function processOutcomes(data) {
         }
       }
 
-      // Use external eventId for storage (to match across different bookmakers)
-      const eventIdForStorage = externalEventId || String(internalEventId);
+      // CRITICAL: Use ONLY internalEventId (outcome[1]) for storage
+      // This is the OddsMarket internal ID that matches across ALL bookmakers
+      // The externalEventId is bookmaker-specific and MUST NOT be used for matching
+      const eventIdForStorage = String(internalEventId);
 
       // Only process valid bookmakers
       const validBookmakers = [21, 103];
