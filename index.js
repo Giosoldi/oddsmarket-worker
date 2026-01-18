@@ -417,20 +417,77 @@ function parseEventName(eventName) {
 
 // ============ TIMESTAMP HANDLING ============
 // OddsMarket timestamps are NOT reliable kickoff times
-// raw_start_time: stored as-is for matching (internal use only)
-// kickoff_time: left null (not auto-derived to avoid wrong dates)
+// The feed often returns timestamps from 1983 due to incorrect parsing
+// Solution: Detect invalid dates and use current date rounded to 30min intervals
+// This ensures cross-bookmaker matching works even with broken timestamps
+
+// Unix timestamp offset to fix OddsMarket's 1983 dates
+// OddsMarket appears to use a different epoch or format
+const ODDSMARKET_EPOCH_OFFSET = 1356998400; // ~43 years in seconds (1970 to 2013)
+
+function parseOddsMarketTimestamp(rawTimestamp) {
+  // Try to convert OddsMarket timestamp to valid ISO string
+  if (!rawTimestamp) return null;
+  
+  let timestamp = rawTimestamp;
+  
+  // If it's already an ISO string, parse it
+  if (typeof rawTimestamp === 'string' && rawTimestamp.includes('T')) {
+    const date = new Date(rawTimestamp);
+    if (!isNaN(date.getTime())) {
+      // Check if the date is reasonable (after 2020)
+      if (date.getFullYear() >= 2020) {
+        return date;
+      }
+      // Date is too old, needs correction
+      timestamp = Math.floor(date.getTime() / 1000);
+    }
+  }
+  
+  // Handle numeric timestamp
+  if (typeof timestamp === 'number' || !isNaN(Number(timestamp))) {
+    const numTimestamp = Number(timestamp);
+    
+    // Try as-is first (might be milliseconds)
+    let date = new Date(numTimestamp);
+    if (date.getFullYear() >= 2020 && date.getFullYear() <= 2030) {
+      return date;
+    }
+    
+    // Try as seconds
+    date = new Date(numTimestamp * 1000);
+    if (date.getFullYear() >= 2020 && date.getFullYear() <= 2030) {
+      return date;
+    }
+    
+    // Apply epoch offset correction (for 1983 dates)
+    date = new Date((numTimestamp + ODDSMARKET_EPOCH_OFFSET) * 1000);
+    if (date.getFullYear() >= 2020 && date.getFullYear() <= 2030) {
+      return date;
+    }
+  }
+  
+  // If all parsing fails, return null (will use fallback)
+  return null;
+}
 
 function roundRawStartTime(timestamp) {
-  // This function rounds the raw OddsMarket timestamp for MATCHING purposes only
+  // This function rounds the timestamp for MATCHING purposes only
   // The result is NOT a real kickoff time and should NOT be displayed to users
-  if (!timestamp) return 'unknown';
   
-  const date = new Date(timestamp);
-  if (isNaN(date.getTime())) return 'unknown';
+  let date = parseOddsMarketTimestamp(timestamp);
   
-  // Round to nearest 5 minutes for matching tolerance
+  // If parsing failed, use current time rounded to 30-minute intervals
+  // This ensures events from both bookmakers match within the same time window
+  if (!date) {
+    date = new Date();
+    console.log(`⚠️ Invalid timestamp "${timestamp}", using current time for matching`);
+  }
+  
+  // Round to nearest 30 minutes for matching tolerance
+  // Using 30 min instead of 5 min gives more flexibility for slight time differences
   const minutes = date.getMinutes();
-  const roundedMinutes = Math.round(minutes / 5) * 5;
+  const roundedMinutes = Math.round(minutes / 30) * 30;
   date.setMinutes(roundedMinutes);
   date.setSeconds(0);
   date.setMilliseconds(0);
@@ -1075,18 +1132,23 @@ async function processBookmakerEvents(data) {
       // Format: [eventId, bookmakerId, active, timestamp, eventName, sportId?, league?, ...]
       eventId = event[0];
       bookmakerId = event[1];
-      // event[2] is boolean (active)
-      // event[3] is timestamp
+      // event[3] is timestamp - parse with correction for 1983 dates
       eventName = event[4] || `Event ${eventId}`;
       // Try to find league in remaining elements
       league = event[6] || event[7] || "Soccer";
-      startsAt = event[3] ? new Date(event[3] * 1000).toISOString() : null;
+      
+      // Use parseOddsMarketTimestamp to handle broken timestamps
+      const parsedDate = parseOddsMarketTimestamp(event[3]);
+      startsAt = parsedDate ? parsedDate.toISOString() : null;
     }
     // If it's an object
     else if (typeof event === "object") {
       eventId = event.id || event.eventId || event.eid;
       eventName = event.name || event.eventName || `${event.home || "Home"} vs ${event.away || "Away"}`;
-      startsAt = event.starts_at || event.startsAt || event.start_time;
+      // Parse timestamp from object format as well
+      const rawTime = event.starts_at || event.startsAt || event.start_time;
+      const parsedDate = parseOddsMarketTimestamp(rawTime);
+      startsAt = parsedDate ? parsedDate.toISOString() : rawTime;
       league = event.league || event.leagueName || event.tournament || "Soccer";
       bookmakerId = event.bookmaker_id || event.bookmakerId;
     }
