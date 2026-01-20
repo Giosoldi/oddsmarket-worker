@@ -467,20 +467,19 @@ async function processOutcomes(data) {
           marketKind = mapped.type;
 
           if (marketKind === MARKET_TYPE.H2H && betValueMatch) {
-  const betValue = parseFloat(betValueMatch[1]);
-  if (betValue === 1) selection = "1";
-  else if (betValue === 2) selection = "2";
-  else if (betValue === 0 || betValue === 3) selection = "X";
-}
+            const betValue = parseFloat(betValueMatch[1]);
+            if (betValue === 1) selection = "1";
+            else if (betValue === 2) selection = "2";
+            else if (betValue === 0 || betValue === 3) selection = "X";
+          }
 
-if (marketKind === MARKET_TYPE.OU && betValueMatch) {
-  const line = parseFloat(betValueMatch[1]);
-  selection = infoString.includes("Over")
-  ? `Over ${line}`
-  : `Under ${line}`;
-
-}
-
+          if (marketKind === MARKET_TYPE.OU && betValueMatch) {
+            const line = parseFloat(betValueMatch[1]);
+            selection = infoString.includes("Over")
+              ? `Over ${line}`
+              : `Under ${line}`;
+          }
+        }
       } else if (bookmakerId === 103) {
         // SISAL
         const marketMatch = infoString.match(/codiceScommessa=(\d+)/);
