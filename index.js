@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { createClient } from "@supabase/supabase-js";
+import http from "http";
 
 // Configuration
 const ODDSMARKET_API_KEY = process.env.ODDSMARKET_API_KEY;
@@ -618,7 +619,6 @@ setInterval(() => {
 
 // Health check server per Railway
 const PORT = process.env.PORT || 3000;
-import http from "http";
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "application/json" });
