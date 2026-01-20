@@ -139,7 +139,7 @@ const SERIE_A_LEAGUES = [
 ];
 
 function isSerieALeague(league) {
-  if (!league) return false;
+  if (!league || typeof league !== "string") return false;
   const normalized = league.toLowerCase().trim();
   return SERIE_A_LEAGUES.some((l) => normalized.includes(l) || l.includes(normalized));
 }
