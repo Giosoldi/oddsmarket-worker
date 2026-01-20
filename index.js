@@ -102,8 +102,6 @@ const ONEXBET_MARKETS = {
   7799: { canonical: CANONICAL_MARKETS.OFFSIDES, scope: MARKET_SCOPE.TOTAL, type: MARKET_TYPE.OU },
   741: { canonical: CANONICAL_MARKETS.CORNERS, scope: MARKET_SCOPE.TOTAL, type: MARKET_TYPE.OU },
   742: { canonical: CANONICAL_MARKETS.CORNERS, scope: MARKET_SCOPE.TOTAL, type: MARKET_TYPE.OU },
-...
-
 };
 
 // Sisal codiceScommessa -> mercato standardizzato
